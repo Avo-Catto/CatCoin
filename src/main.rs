@@ -1,8 +1,8 @@
-use crate::src::{Transaction, TransactionPool};
+use crate::src::{merkle_hash, Transaction, TransactionPool};
 
 mod src;
 
-fn main() {
+fn test() {
     // transaction values
     let src: &str = "avo-catto";
     let dst: &str = "anyone else";
@@ -44,4 +44,12 @@ fn main() {
     pool.flush();
     println!("\n{}", pool.str());
 
+    // merkle hash
+    let hash_list: [String; 4] = ["Hello world".to_string(), "avocado".to_string(), "abcd".to_string(), "ahhhhh".to_string()];
+    println!("{:?}", merkle_hash(hash_list.to_vec()));
+}
+
+
+fn main() {
+    test();
 }

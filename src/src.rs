@@ -9,6 +9,38 @@ pub fn hash_str(data: &[u8]) -> String {
     format!("{:X}", hasher.finalize()) // return hex value as String
 }
 
+pub fn merkle_hash(data: Vec<String>) -> Result<String, ()> {
+    // take a list of strings and hash it to one by using the merkle tree TODO: doc strings!!!
+
+    // check if length of list is even
+    let len = data.len() - 1;
+    let even: bool = match len % 2 {
+        1 => true,
+        0 => false,
+        _ => false, // this case will never happen
+    };
+
+    // merge hash
+    let mut output: Vec<String> = Vec::new();
+    let mut hash_input: String;
+    let mut hash: String;
+
+    for i in (0..len).step_by(2) {
+        hash_input = format!("{}${}", data[i], data[i+1]); // merge two elements
+        hash = hash_str(hash_input.as_bytes()); // hash it
+        output.push(hash);
+    }
+
+    if !even {
+        hash = hash_str(data[len].as_bytes());
+        output.push(hash);
+    }
+
+    if len > 1 { merkle_hash(output) }
+    else if output.len() == 1 { Ok(output[0].clone()) }
+    else { Err(()) }
+}
+
 #[derive(Clone)]
 pub struct Transaction {
     src: String,
@@ -75,7 +107,7 @@ impl TransactionPool {
         TransactionPool { pool: Vec::new() }
     }
 
-    pub fn add(&mut self, transaction: &Transaction) -> bool {
+    pub fn add(&mut self, transaction: &Transaction) -> bool { // TODO: return error or ok
         // check if transaction already in pool
         for iter_transaction in &self.pool {
             if iter_transaction.hash == transaction.hash { return false } 
