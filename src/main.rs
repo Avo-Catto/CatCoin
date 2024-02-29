@@ -1,6 +1,7 @@
 use crate::src::{merkle_hash, Transaction, TransactionPool};
 
 mod src;
+pub mod errors;
 
 fn test() {
     // transaction values
@@ -28,14 +29,20 @@ fn test() {
     let mut pool = TransactionPool::new();
 
     // add original transaction
-    if pool.add(&transaction) { println!("added! {:?}", transaction.as_json()["val"]) }
-    else { println!("not added! {:?}", transaction.as_json()["val"]) }
+    match pool.add(&transaction) { 
+        Ok(()) => println!("added! {:?}", transaction.as_json()["val"]),
+        Err(_) => println!("not added! {:?}", transaction.as_json()["val"]),
+    }
     
-    if pool.add(&transaction2) { println!("added! {:?}", transaction.as_json()["val"]) }
-    else { println!("not added! {:?}", transaction2.as_json()["val"]) }
+    match pool.add(&transaction2) {
+        Ok(()) => println!("added! {:?}", transaction.as_json()["val"]),
+        Err(_) => println!("not added! {:?}", transaction2.as_json()["val"]),
+    }
 
-    if pool.add(&transaction_copy) { println!("added! {:?}", transaction.as_json()["val"]) }
-    else { println!("not added! {:?}", transaction_copy.as_json()["val"]) }
+    match pool.add(&transaction_copy) {
+        Ok(()) => println!("added! {:?}", transaction.as_json()["val"]),
+        Err(_) => println!("not added! {:?}", transaction_copy.as_json()["val"]),
+    }
 
     // print pool
     println!("\n{}", pool.str());
@@ -46,7 +53,7 @@ fn test() {
 
     // merkle hash
     let hash_list: [String; 4] = ["Hello world".to_string(), "avocado".to_string(), "abcd".to_string(), "ahhhhh".to_string()];
-    println!("{:?}", merkle_hash(hash_list.to_vec()));
+    println!("{:?}", merkle_hash(hash_list.to_vec()).unwrap());
 }
 
 

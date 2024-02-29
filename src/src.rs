@@ -2,6 +2,8 @@ use std::str::FromStr;
 use serde_json::json;
 use sha2::{Sha256, Digest};
 
+use crate::errors::PoolError;
+
 pub fn hash_str(data: &[u8]) -> String {
     // hash data
     let mut hasher = Sha256::new();
@@ -41,7 +43,7 @@ pub fn merkle_hash(data: Vec<String>) -> Result<String, ()> {
     else { Err(()) }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Transaction {
     src: String,
     dst: String,
@@ -107,13 +109,13 @@ impl TransactionPool {
         TransactionPool { pool: Vec::new() }
     }
 
-    pub fn add(&mut self, transaction: &Transaction) -> bool { // TODO: return error or ok
+    pub fn add(&mut self, transaction: &Transaction) -> Result<(), PoolError> {
         // check if transaction already in pool
-        for iter_transaction in &self.pool {
-            if iter_transaction.hash == transaction.hash { return false } 
+        if self.pool.contains(transaction) {
+            return Err(PoolError::DuplicatedTransaction);
         }
         self.pool.push(transaction.clone()); // add transaction to pool
-        true
+        Ok(())
     }
 
     pub fn flush(&mut self) {
