@@ -1,4 +1,4 @@
-use crate::src::{merkle_hash, Transaction, TransactionPool};
+use crate::src::{merkle_hash, Block, Transaction, TransactionPool};
 
 mod src;
 pub mod errors;
@@ -12,9 +12,9 @@ fn test() {
     let broadcast: bool = false;
 
     // create transaction
-    let transaction = src::Transaction::new(src, dst, date, val, broadcast);
+    let transaction = Transaction::new(src, dst, date, val, broadcast);
     val = 1.0;
-    let transaction2 = src::Transaction::new(src, dst, date, val, broadcast);
+    let transaction2 = Transaction::new(src, dst, date, val, broadcast);
     println!("{}", transaction.str());
     
     // cast transaction to json
@@ -54,6 +54,22 @@ fn test() {
     // merkle hash
     let hash_list: [String; 4] = ["Hello world".to_string(), "avocado".to_string(), "abcd".to_string(), "ahhhhh".to_string()];
     println!("{:?}", merkle_hash(hash_list.to_vec()).unwrap());
+
+    // block
+    let block = Block::new(0, [transaction, transaction2].to_vec(), "avocado".to_string());
+    println!("block.hash: {}", block.clone().calc_hash(50)); // FIXME: block instance is overwritten by return value???
+    println!("block.nonce: {}", block.nonce);
+
+    // print block
+    println!("{}", block.str());
+
+    // block serialization / deserialization
+    let block_json = block.as_json();
+    println!("{:#?}", block_json);
+    
+    let block_copy = Block::from_json(block_json);
+    println!("{}", block_copy.str());
+
 }
 
 

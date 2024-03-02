@@ -1,8 +1,13 @@
 use std::str::FromStr;
 use serde_json::json;
 use sha2::{Sha256, Digest};
+use chrono::Utc;
 
 use crate::errors::PoolError;
+
+pub fn datetime_now() -> String {
+    Utc::now().to_rfc3339()
+}
 
 pub fn hash_str(data: &[u8]) -> String {
     // hash data
@@ -12,8 +17,6 @@ pub fn hash_str(data: &[u8]) -> String {
 }
 
 pub fn merkle_hash(data: Vec<String>) -> Result<String, ()> {
-    // take a list of strings and hash it to one by using the merkle tree TODO: doc strings!!!
-
     // check if length of list is even
     let len = data.len() - 1;
     let even: bool = match len % 2 {
@@ -33,14 +36,14 @@ pub fn merkle_hash(data: Vec<String>) -> Result<String, ()> {
         output.push(hash);
     }
 
-    if !even {
+    if !even { // append hash of last element if not even
         hash = hash_str(data[len].as_bytes());
         output.push(hash);
     }
 
-    if len > 1 { merkle_hash(output) }
-    else if output.len() == 1 { Ok(output[0].clone()) }
-    else { Err(()) }
+    if len > 1 { merkle_hash(output) } // if elements left
+    else if output.len() == 1 { Ok(output[0].clone()) } // return output
+    else { Err(()) } // raise error
 }
 
 #[derive(Clone, PartialEq)]
@@ -50,13 +53,15 @@ pub struct Transaction {
     date: String,
     val: f64,
     broadcast: bool,
-    hash: String
+    hash: String,
 }
 
 impl Transaction {
     // contstructor
     pub fn new(src: &str, dst: &str, date: &str, val: f64, broadcast: bool) -> Transaction{
-        let hash_fmt: String = format!("{}${}${}${}", src, dst, date, val); // create hash format string
+        // create hash format string
+        let hash_fmt: String = format!("{}${}${}${}", src, dst, date, val); 
+        
         // construct transaction
         Transaction {
             src: String::from_str(src).unwrap(),
@@ -70,13 +75,15 @@ impl Transaction {
 
     pub fn from_json(json: serde_json::Value) -> Transaction {
         // construct transaction from json
-        Self::new(
-            json.get("src").unwrap().as_str().expect("from_json: src"),
-            json.get("dst").unwrap().as_str().expect("from_json: dst"),
-            json.get("date").unwrap().as_str().expect("from_json: date"),
-            json.get("val").unwrap().as_f64().expect("from_json: val"),
-            json.get("broadcast").unwrap().as_bool().expect("from_json: broadcast")
-        )
+        let mut transaction = Self::new(
+            json.get("src").unwrap().as_str().expect("Transaction::from_json: src"),
+            json.get("dst").unwrap().as_str().expect("Transaction::from_json: dst"),
+            json.get("date").unwrap().as_str().expect("Transaction::from_json: date"),
+            json.get("val").unwrap().as_f64().expect("Transaction::from_json: val"),
+            json.get("broadcast").unwrap().as_bool().expect("Transaction::from_json: broadcast")
+        );
+        transaction.hash = json.get("hash").unwrap().to_string();
+        transaction
     }
 
     pub fn as_json(&self) -> serde_json::Value {
@@ -86,21 +93,22 @@ impl Transaction {
             "dst": self.dst,
             "date": self.date,
             "val": self.val,
-            "broadcast": self.broadcast
+            "broadcast": self.broadcast,
+            "hash": self.hash,
         })
     }
 
     pub fn str(&self) -> String {
         // return transaction as String
         format!(
-            "> Source: {}\n> Destination: {}\n> Date: {}\n> Value: {}\n> Hash: {}", 
+            "- Source: {}\n- Destination: {}\n- Date: {}\n- Value: {}\n- Hash: {}\n", 
             self.src, self.dst, self.date, self.val, self.hash
         )
     }
 }
 
 pub struct TransactionPool {
-    pool: Vec<Transaction>
+    pool: Vec<Transaction>,
 }
 
 impl TransactionPool {
@@ -132,5 +140,96 @@ impl TransactionPool {
             output.push(transaction.str());
         }
         output.join("\n\n") // return list of transactions as one String
+    }
+}
+
+#[derive(Clone)]
+pub struct Block {
+    index: u64,
+    datetime: String,
+    transactions: Vec<Transaction>,
+    previous_hash: String,
+    pub nonce: u64,
+    hash: String,
+    merkle: String,
+    hash_str: String,
+}
+
+impl Block {
+    // constructor
+    pub fn new(index: u64, transactions: Vec<Transaction>, prev_hash: String) -> Block {
+        // get datetime and calculate merkle hash
+        let datetime = datetime_now();
+        let merkle: String = merkle_hash(transactions.iter().map(|x| x.hash.clone()).collect())
+                                 .expect("Block::new().merkle_hash failed");
+        Block {
+            index,
+            datetime: datetime.clone(),
+            transactions: transactions.clone(),
+            previous_hash: prev_hash,
+            nonce: 0,
+            hash: "".to_string(),
+            merkle: merkle.clone(),
+            hash_str: format!("{}${}${}", index, datetime, merkle),
+        }
+    }
+
+    pub fn calc_hash(mut self, nonce:u64) -> String {
+        // update nonce and calculate hash
+        self.nonce = nonce;
+        hash_str(format!("{}${}", self.hash_str, nonce).as_bytes())
+    }
+
+    pub fn as_json(&self) -> serde_json::Value{
+        // return block as json
+        json!({
+            "index": self.index,
+            "datetime": self.datetime,
+            "transactions": self.transactions.iter().map(|x| x.as_json()).collect::<Vec<serde_json::Value>>(),
+            "previous_hash": self.previous_hash,
+            "nonce": self.nonce,
+            "hash": self.hash,
+            "merkle": self.merkle,
+        })
+    }
+
+    pub fn from_json(json: serde_json::Value) -> Block {
+        // deserialize transactions
+        let mut transactions: Vec<Transaction> = Vec::new();
+
+        // iterate through transactions
+        if let Some(i) = json.get("transactions").unwrap().as_array() {
+            for t in i {
+                transactions.push(Transaction::from_json(t.clone())); // construct transactions
+            }
+        }
+
+        // construct block
+        let mut block = Self::new(
+            json.get("index").unwrap().as_u64().expect("Block::from_json: index"),
+            transactions, 
+            json.get("previous_hash").unwrap().to_string()
+        );
+
+        // update values
+        block.datetime = json.get("datetime").unwrap().to_string();
+        block.nonce = json.get("nonce").unwrap().as_u64().expect("Block::from_json: nonce");
+        block.hash = json.get("hash").unwrap().to_string();
+        block.merkle = json.get("merkle").unwrap().to_string();
+        block
+    }
+
+    pub fn str(&self) -> String {
+        // block head
+        let mut output: String = format!(
+            "> Index: {}\n> Datetime: {}\n> Previous Hash: {}\n> Nonce: {}\n> Hash: {}\n> Transactions:\n", 
+            self.index, self.datetime, self.previous_hash, self.nonce, self.hash
+        );
+
+        // append transactions
+        for t in &self.transactions {
+            output = format!("{}\n{}", output, t.str());
+        }
+        output
     }
 }
