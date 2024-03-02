@@ -1,9 +1,9 @@
 use std::str::FromStr;
 use serde_json::json;
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use chrono::Utc;
 
-use crate::errors::PoolError;
+use crate::errors::{BlockChainError, PoolError};
 
 pub fn datetime_now() -> String {
     Utc::now().to_rfc3339()
@@ -143,14 +143,14 @@ impl TransactionPool {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Block {
-    index: u64,
+    pub index: u64,
     datetime: String,
     transactions: Vec<Transaction>,
     previous_hash: String,
     pub nonce: u64,
-    hash: String,
+    pub hash: String,
     merkle: String,
     hash_str: String,
 }
@@ -160,24 +160,31 @@ impl Block {
     pub fn new(index: u64, transactions: Vec<Transaction>, prev_hash: String) -> Block {
         // get datetime and calculate merkle hash
         let datetime = datetime_now();
-        let merkle: String = merkle_hash(transactions.iter().map(|x| x.hash.clone()).collect())
-                                 .expect("Block::new().merkle_hash failed");
+        let merkle: String = match transactions.is_empty() {
+            true => { String::new() }
+            false => {
+                merkle_hash(transactions.iter().map(|x| x.hash.clone()).collect())
+                .expect("Block::new().merkle_hash failed") 
+            }
+        };
         Block {
             index,
             datetime: datetime.clone(),
-            transactions: transactions.clone(),
+            transactions,
             previous_hash: prev_hash,
             nonce: 0,
-            hash: "".to_string(),
+            hash: String::new(),
             merkle: merkle.clone(),
             hash_str: format!("{}${}${}", index, datetime, merkle),
         }
     }
 
-    pub fn calc_hash(mut self, nonce:u64) -> String {
+    pub fn calc_hash(&mut self, nonce:u64) -> String {
         // update nonce and calculate hash
         self.nonce = nonce;
-        hash_str(format!("{}${}", self.hash_str, nonce).as_bytes())
+        let hash = hash_str(format!("{}${}", self.hash_str, nonce).as_bytes());
+        self.hash = hash.clone();
+        hash
     }
 
     pub fn as_json(&self) -> serde_json::Value{
@@ -229,6 +236,64 @@ impl Block {
         // append transactions
         for t in &self.transactions {
             output = format!("{}\n{}", output, t.str());
+        }
+        output
+    }
+}
+
+pub struct BlockChain {
+    chain: Vec<Block>,
+}
+
+impl BlockChain {
+    // constructor
+    pub fn new() -> BlockChain {
+        BlockChain {
+            chain: Vec::new(),
+        }
+    }
+
+    // construct blockchain with genisis block
+    pub fn new_with_genisis() -> BlockChain {
+        let mut chain = Self::new();
+        let mut genisis_block = Block::new(0, Vec::new(), String::new());
+        genisis_block.calc_hash(0);
+        let _ = chain.add_block(&genisis_block);
+        chain
+    }
+
+    pub fn get_chain(&self) -> Vec<Block> {
+        self.chain.clone()
+    }
+
+    pub fn set_chain(&mut self, chain: Vec<Block>) {
+        self.chain = chain;
+    }
+
+    pub fn get_latest(&self) -> Block {
+        self.chain.last().unwrap().clone()
+    }
+
+    pub fn add_block(&mut self, block: &Block) -> Result<(), BlockChainError> {
+        // check if block already in chain
+        if self.chain.contains(&block) {
+            return Err(BlockChainError::DuplicatedBlock);
+        }
+
+        // check if block is valid
+        if block.hash.is_empty() {
+            return Err(BlockChainError::InvalidBlock);
+        }
+
+        // add block to chain
+        self.chain.push(block.clone());
+        Ok(())
+    }
+
+    pub fn str(&self) -> String {
+        let mut output = "Blockchain:\n".to_string();
+        for block in &self.chain {
+            output = format!("{}\n{}", output, block.str());
         }
         output
     }

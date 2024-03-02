@@ -1,10 +1,12 @@
-use crate::src::{merkle_hash, Block, Transaction, TransactionPool};
+use crate::src::{merkle_hash, Block, BlockChain, Transaction, TransactionPool};
 
 mod src;
 pub mod errors;
 
 fn test() {
     // transaction values
+    println!("\n\nTransaction:\n\n");
+
     let src: &str = "avo-catto";
     let dst: &str = "anyone else";
     let date: &str = "today";
@@ -25,7 +27,10 @@ fn test() {
     let transaction_copy = Transaction::from_json(transaction_json);
     println!("{}", transaction_copy.str());
 
+
     // transaction pool
+    println!("\n\nTransactionPool:\n\n");
+
     let mut pool = TransactionPool::new();
 
     // add original transaction
@@ -51,13 +56,18 @@ fn test() {
     pool.flush();
     println!("\n{}", pool.str());
 
+
     // merkle hash
     let hash_list: [String; 4] = ["Hello world".to_string(), "avocado".to_string(), "abcd".to_string(), "ahhhhh".to_string()];
     println!("{:?}", merkle_hash(hash_list.to_vec()).unwrap());
 
+
     // block
-    let block = Block::new(0, [transaction, transaction2].to_vec(), "avocado".to_string());
-    println!("block.hash: {}", block.clone().calc_hash(50)); // FIXME: block instance is overwritten by return value???
+    println!("\n\nBlock:\n\n");
+
+    let mut block = Block::new(0, [transaction.clone(), transaction2.clone()].to_vec(), "avocado".to_string());
+    
+    println!("block.hash: {}", block.calc_hash(0));
     println!("block.nonce: {}", block.nonce);
 
     // print block
@@ -69,6 +79,35 @@ fn test() {
     
     let block_copy = Block::from_json(block_json);
     println!("{}", block_copy.str());
+
+
+    // blockchain
+    println!("\n\nBlockchain:\n\n");
+    
+    let mut new_block = Block::new(0, Vec::new(), "genisis block".to_string());
+    println!("Hash: {}", new_block.calc_hash(2));
+    println!("Block:\n{}", new_block.str());
+
+    let mut block_chain = BlockChain::new_with_genisis();
+    let _ = block_chain.add_block(&new_block);
+
+    for i in block_chain.get_chain() {
+        println!("Hash of block in chain: {}", i.hash);
+    }
+
+    println!("last block: {}", block_chain.get_latest().hash);
+
+    let new_chain = [block, new_block];
+
+    block_chain.set_chain(new_chain.to_vec());
+
+    for i in block_chain.get_chain() {
+        println!("Hash of block in chain: {}", i.hash);
+    }
+
+    println!("{}", block_chain.str());
+
+    println!("\n\nExecution succeed\n\n");
 
 }
 
