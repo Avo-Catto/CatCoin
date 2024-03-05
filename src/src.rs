@@ -2,7 +2,6 @@ use std::str::FromStr;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use chrono::Utc;
-
 use crate::errors::{BlockChainError, PoolError};
 
 pub fn datetime_now() -> String {
@@ -46,7 +45,7 @@ pub fn merkle_hash(data: Vec<String>) -> Result<String, ()> {
     else { Err(()) } // raise error
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct Transaction {
     src: String,
     dst: String,
@@ -58,15 +57,15 @@ pub struct Transaction {
 
 impl Transaction {
     // contstructor
-    pub fn new(src: &str, dst: &str, date: &str, val: f64, broadcast: bool) -> Transaction{
-        // create hash format string
-        let hash_fmt: String = format!("{}${}${}${}", src, dst, date, val); 
+    pub fn new(src: &str, dst: &str, val: f64, broadcast: bool) -> Transaction{
+        let date = datetime_now();
+        let hash_fmt = format!("{}${}${}${}", src, dst, date, val); 
         
         // construct transaction
         Transaction {
             src: String::from_str(src).unwrap(),
             dst: String::from_str(dst).unwrap(),
-            date: String::from_str(date).unwrap(),
+            date,
             val,
             broadcast,
             hash: hash_str(hash_fmt.as_bytes())
@@ -78,11 +77,11 @@ impl Transaction {
         let mut transaction = Self::new(
             json.get("src").unwrap().as_str().expect("Transaction::from_json: src"),
             json.get("dst").unwrap().as_str().expect("Transaction::from_json: dst"),
-            json.get("date").unwrap().as_str().expect("Transaction::from_json: date"),
             json.get("val").unwrap().as_f64().expect("Transaction::from_json: val"),
             json.get("broadcast").unwrap().as_bool().expect("Transaction::from_json: broadcast")
         );
-        transaction.hash = json.get("hash").unwrap().to_string();
+        transaction.date = json.get("date").unwrap().to_string().replace("\"", "");
+        transaction.hash = json.get("hash").unwrap().to_string().replace("\"", "");
         transaction
     }
 
@@ -96,6 +95,15 @@ impl Transaction {
             "broadcast": self.broadcast,
             "hash": self.hash,
         })
+    }
+
+    pub fn validate(&self) -> bool { // TODO: check everything you can, also date
+        // create hash format string
+        let hash_fmt = format!("{}${}${}${}", self.src, self.dst, self.date, self.val);
+
+        // check hash
+        if hash_str(hash_fmt.as_bytes()) == self.hash { true }
+        else { false }
     }
 
     pub fn str(&self) -> String {
@@ -143,7 +151,7 @@ impl TransactionPool {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct Block {
     pub index: u64,
     datetime: String,
@@ -187,6 +195,10 @@ impl Block {
         hash
     }
 
+    pub fn validate(&self) -> bool { // TODO: check if block is valid
+        true
+    }
+
     pub fn as_json(&self) -> serde_json::Value{
         // return block as json
         json!({
@@ -200,7 +212,7 @@ impl Block {
         })
     }
 
-    pub fn from_json(json: serde_json::Value) -> Block {
+    pub fn from_json(json: serde_json::Value) -> Block { // TODO: some strings are parsed wrong
         // deserialize transactions
         let mut transactions: Vec<Transaction> = Vec::new();
 
@@ -255,10 +267,10 @@ impl BlockChain {
 
     // construct blockchain with genisis block
     pub fn new_with_genisis() -> BlockChain {
-        let mut chain = Self::new();
-        let mut genisis_block = Block::new(0, Vec::new(), String::new());
-        genisis_block.calc_hash(0);
-        let _ = chain.add_block(&genisis_block);
+        let mut chain = Self::new(); // new chain
+        let mut genisis_block = Block::new(0, Vec::new(), String::new()); // new block
+        genisis_block.calc_hash(0); // calc hash of block
+        let _ = chain.add_block(&genisis_block); // append block to chain
         chain
     }
 
@@ -279,19 +291,16 @@ impl BlockChain {
         if self.chain.contains(&block) {
             return Err(BlockChainError::DuplicatedBlock);
         }
-
-        // check if block is valid
-        if block.hash.is_empty() {
+        // TODO: block.validate()
+        if block.hash.is_empty() { // check if block is valid (actually unnacessary)
             return Err(BlockChainError::InvalidBlock);
         }
-
-        // add block to chain
-        self.chain.push(block.clone());
+        self.chain.push(block.clone()); // add block to chain
         Ok(())
     }
 
     pub fn str(&self) -> String {
-        let mut output = "Blockchain:\n".to_string();
+        let mut output = String::new();
         for block in &self.chain {
             output = format!("{}\n{}", output, block.str());
         }

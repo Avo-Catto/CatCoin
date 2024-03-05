@@ -1,117 +1,124 @@
-use crate::src::{merkle_hash, Block, BlockChain, Transaction, TransactionPool};
+// use crate::src::{merkle_hash, Block, BlockChain, Transaction, TransactionPool};
+use src::BlockChain;
+use std::{io::{Read, Write}, net::{TcpListener, Shutdown}, thread, sync::Mutex};
+use serde::Deserialize;
+use serde_json::json;
+use clap::Parser;
+
+use crate::src::{Block, Transaction, TransactionPool};
 
 mod src;
-pub mod errors;
+mod errors;
 
-fn test() {
-    // transaction values
-    println!("\n\nTransaction:\n\n");
-
-    let src: &str = "avo-catto";
-    let dst: &str = "anyone else";
-    let date: &str = "today";
-    let mut val: f64 = 0.3;
-    let broadcast: bool = false;
-
-    // create transaction
-    let transaction = Transaction::new(src, dst, date, val, broadcast);
-    val = 1.0;
-    let transaction2 = Transaction::new(src, dst, date, val, broadcast);
-    println!("{}", transaction.str());
-    
-    // cast transaction to json
-    let transaction_json: serde_json::Value = transaction.as_json();
-    println!("Source: {:?}", transaction_json.get("src"));
-    
-    // cast json to transaction
-    let transaction_copy = Transaction::from_json(transaction_json);
-    println!("{}", transaction_copy.str());
-
-
-    // transaction pool
-    println!("\n\nTransactionPool:\n\n");
-
-    let mut pool = TransactionPool::new();
-
-    // add original transaction
-    match pool.add(&transaction) { 
-        Ok(()) => println!("added! {:?}", transaction.as_json()["val"]),
-        Err(_) => println!("not added! {:?}", transaction.as_json()["val"]),
-    }
-    
-    match pool.add(&transaction2) {
-        Ok(()) => println!("added! {:?}", transaction.as_json()["val"]),
-        Err(_) => println!("not added! {:?}", transaction2.as_json()["val"]),
-    }
-
-    match pool.add(&transaction_copy) {
-        Ok(()) => println!("added! {:?}", transaction.as_json()["val"]),
-        Err(_) => println!("not added! {:?}", transaction_copy.as_json()["val"]),
-    }
-
-    // print pool
-    println!("\n{}", pool.str());
-
-    // flush pool
-    pool.flush();
-    println!("\n{}", pool.str());
-
-
-    // merkle hash
-    let hash_list: [String; 4] = ["Hello world".to_string(), "avocado".to_string(), "abcd".to_string(), "ahhhhh".to_string()];
-    println!("{:?}", merkle_hash(hash_list.to_vec()).unwrap());
-
-
-    // block
-    println!("\n\nBlock:\n\n");
-
-    let mut block = Block::new(0, [transaction.clone(), transaction2.clone()].to_vec(), "avocado".to_string());
-    
-    println!("block.hash: {}", block.calc_hash(0));
-    println!("block.nonce: {}", block.nonce);
-
-    // print block
-    println!("{}", block.str());
-
-    // block serialization / deserialization
-    let block_json = block.as_json();
-    println!("{:#?}", block_json);
-    
-    let block_copy = Block::from_json(block_json);
-    println!("{}", block_copy.str());
-
-
-    // blockchain
-    println!("\n\nBlockchain:\n\n");
-    
-    let mut new_block = Block::new(0, Vec::new(), "genisis block".to_string());
-    println!("Hash: {}", new_block.calc_hash(2));
-    println!("Block:\n{}", new_block.str());
-
-    let mut block_chain = BlockChain::new_with_genisis();
-    let _ = block_chain.add_block(&new_block);
-
-    for i in block_chain.get_chain() {
-        println!("Hash of block in chain: {}", i.hash);
-    }
-
-    println!("last block: {}", block_chain.get_latest().hash);
-
-    let new_chain = [block, new_block];
-
-    block_chain.set_chain(new_chain.to_vec());
-
-    for i in block_chain.get_chain() {
-        println!("Hash of block in chain: {}", i.hash);
-    }
-
-    println!("{}", block_chain.str());
-
-    println!("\n\nExecution succeed\n\n");
-
+#[derive(Deserialize, Debug)]
+struct Receiver {
+    dtype: i8,
+    data: serde_json::Value
 }
 
+#[derive(Parser, Debug)]
+struct Args {
+    /// address of node
+    #[arg(short, long, default_value_t = String::from("127.0.0.1"))]
+    ip: String,
+
+    /// port of node
+    #[arg(short, long, default_value_t = 8000)]
+    port: u16,
+
+    /// create genisis block
+    #[arg(short, long, default_value_t = false)]
+    genisis: bool,
+}
 
 fn main() {
-    test();
+
+    // testing purpose
+    // println!("{:?}", Transaction::new("abc", "def", 0.4, false).as_json().to_string());
+    // println!("{:?}", Transaction::new("abcd", "defg", 0.8, false).as_json().to_string());
+    let mut block = Block::new(0, [Transaction::new("abcd", "defg", 0.8, false), Transaction::new("abc", "def", 0.4, false)].to_vec(), "avocado".to_string());
+    block.calc_hash(2);
+    println!("{:?}", block.as_json().to_string());
+
+    // get args
+    let args = Args::parse();
+    println!("{:#?}", args);
+
+    /*
+    let mut blockchain = match args.genisis {
+        true => Mutex::new(BlockChain::new_with_genisis()),
+        false => Mutex::new(BlockChain::new()),
+    };
+    */
+    let mut transactionpool = TransactionPool::new();
+    let mut blockchain = match args.genisis {
+        true => BlockChain::new_with_genisis(),
+        false => BlockChain::new(),
+    };
+
+    // #### Communication ####
+    // format address
+    let addr = format!("{}:{}", args.ip, args.port);
+    println!("listening on: {}", addr);
+
+    // create listener
+    let listener: TcpListener = TcpListener::bind(addr).unwrap();
+    for stream in listener.incoming() {
+        // thread::spawn(move || { // spawn thread and handle connection
+
+            // overwriting stream
+            let mut stream = stream.unwrap();
+
+            // create buffer and receive data
+            let mut buffer = String::new();
+            stream.read_to_string(&mut buffer).unwrap();
+            stream.shutdown(Shutdown::Read).unwrap();
+
+            println!("{}", buffer);
+
+            // load json from buffer
+            let data: Receiver = match serde_json::from_str(&buffer) {
+                Ok(n) => n,
+                Err(e) => {
+                    eprintln!("# receiving of data failed: {}", e);
+                    Receiver { dtype: -1, data: json!({}) }
+                },
+            };
+
+            // send response
+            stream.write(format!("{{\"res\": {t} }}", t=data.dtype).as_bytes()).unwrap();
+            stream.shutdown(Shutdown::Write).unwrap();
+
+            // add Transaction
+            if data.dtype == 1 {
+                let transaction = Transaction::from_json(data.data); // construct transaction
+                if !transaction.validate() { // validate transaction
+                    eprintln!("# transaction invalid");
+                    continue
+                }
+                match transactionpool.add(&transaction) { // add transaction to pool
+                    Ok(_) => println!("# transaction added"),
+                    Err(e) => eprintln!("# transaction not added because of: {:?}", e),
+                }
+            
+            // add Block
+            } else if data.dtype == 2 {
+                let block = Block::from_json(data.data); // construct block
+                if !block.validate() { // validate block
+                    eprintln!("# block invalid");
+                    continue
+                }
+                match blockchain.add_block(&block) { // add block to chain FIXME: block added even already in chain
+                    Ok(_) => println!("# block added"),
+                    Err(e) => eprintln!("# block not added because of: {:?}", e),
+                }
+                // blockchain.lock();
+                // blockchain.get_mut().unwrap().add_block(&block).expect("received block couldN't be appended to blockchain");
+            }
+
+            // debug
+            println!("Transactions: \n{}", transactionpool.str());
+            println!("Blockchain: {}\n\n\n", blockchain.str());
+        // });
+    }
 }
