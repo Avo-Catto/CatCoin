@@ -4,8 +4,8 @@ use std::{io::{Read, Write}, net::{TcpListener, Shutdown}, thread, sync::Mutex};
 use serde::Deserialize;
 use serde_json::json;
 use clap::Parser;
-
-use crate::src::{Block, Transaction, TransactionPool};
+use uuid::Uuid;
+use crate::src::{Block, Transaction, TransactionPool, hash_str};
 
 mod src;
 mod errors;
@@ -33,12 +33,16 @@ struct Args {
 
 fn main() {
 
-    // testing purpose
-    // println!("{:?}", Transaction::new("abc", "def", 0.4, false).as_json().to_string());
-    // println!("{:?}", Transaction::new("abcd", "defg", 0.8, false).as_json().to_string());
-    let mut block = Block::new(0, [Transaction::new("abcd", "defg", 0.8, false), Transaction::new("abc", "def", 0.4, false)].to_vec(), "avocado".to_string());
+    // # transaction
+    // println!("{:?}", Transaction::new(&Uuid::new_v4().to_string(), &Uuid::new_v4().to_string(), 0.4, false).as_json().to_string());
+    // println!("{:?}", Transaction::new(&Uuid::new_v4().to_string(), &Uuid::new_v4().to_string(), 0.8, false).as_json().to_string());
+    
+    // # block
+    let transactions_test = [Transaction::new(&Uuid::new_v4().to_string(), &Uuid::new_v4().to_string(), 0.4, false), Transaction::new(&Uuid::new_v4().to_string(), &Uuid::new_v4().to_string(), 0.8, false)];
+    let mut block = Block::new(0, transactions_test.to_vec(), hash_str("avocado".as_bytes()));
     block.calc_hash(2);
     println!("{:?}", block.as_json().to_string());
+
 
     // get args
     let args = Args::parse();
@@ -91,23 +95,38 @@ fn main() {
 
             // add Transaction
             if data.dtype == 1 {
-                let transaction = Transaction::from_json(data.data); // construct transaction
-                if !transaction.validate() { // validate transaction
-                    eprintln!("# transaction invalid");
-                    continue
+                // construct transaction
+                let transaction = Transaction::from_json(data.data);
+                
+                // perform some checks on the transaction
+                match transaction.validate() {
+                    Ok(()) => println!("# transaction valid"),
+                    Err(e) => {
+                        eprintln!("# transaction invalid: {:?}", e);
+                        continue
+                    },
                 }
-                match transactionpool.add(&transaction) { // add transaction to pool
+                
+                // add transaction to pool
+                match transactionpool.add(&transaction) {
                     Ok(_) => println!("# transaction added"),
                     Err(e) => eprintln!("# transaction not added because of: {:?}", e),
                 }
             
             // add Block
             } else if data.dtype == 2 {
-                let block = Block::from_json(data.data); // construct block
-                if !block.validate() { // validate block
-                    eprintln!("# block invalid");
-                    continue
+                // construct block
+                let block = Block::from_json(data.data);
+                
+                // perform some checks on block
+                match block.validate() {
+                    Ok(()) => println!("# block valid"),
+                    Err(e) => {
+                        eprintln!("# block invalid: {:?}", e);
+                        continue
+                    },
                 }
+
                 match blockchain.add_block(&block) { // add block to chain FIXME: block added even already in chain
                     Ok(_) => println!("# block added"),
                     Err(e) => eprintln!("# block not added because of: {:?}", e),

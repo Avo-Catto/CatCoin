@@ -2,7 +2,8 @@ use std::str::FromStr;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use chrono::Utc;
-use crate::errors::{BlockChainError, PoolError};
+use regex::Regex;
+use crate::errors::{BlockChainError, PoolError, BlockError, TransactionValidationError as TVE};
 
 pub fn datetime_now() -> String {
     Utc::now().to_rfc3339()
@@ -97,13 +98,23 @@ impl Transaction {
         })
     }
 
-    pub fn validate(&self) -> bool { // TODO: check everything you can, also date
-        // create hash format string
+    pub fn recalc_hash(&self) -> String {
+        // recalculate hash and return it
         let hash_fmt = format!("{}${}${}${}", self.src, self.dst, self.date, self.val);
+        hash_str(hash_fmt.as_bytes())
+    }
 
-        // check hash
-        if hash_str(hash_fmt.as_bytes()) == self.hash { true }
-        else { false }
+    pub fn validate(&self) -> Result<(), TVE> {
+        // check if values of transaction are valid
+        let uuid_re = Regex::new("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$").unwrap();
+        let datetime_re = Regex::new(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\d{3}\+\d{2}:\d{2})$").unwrap();
+        
+        // regex check
+        if uuid_re.captures(&self.src).is_none() { return Err(TVE::MismatchSource) } // check src
+        if uuid_re.captures(&self.dst).is_none() { return Err(TVE::MismatchDestination) } // check dst
+        if datetime_re.captures(&self.date).is_none() { return Err(TVE::MismatchDate) } // check date
+        if self.recalc_hash() != self.hash { return Err(TVE::MismatchHash) } // check hash
+        Ok(())
     }
 
     pub fn str(&self) -> String {
@@ -172,7 +183,7 @@ impl Block {
             true => { String::new() }
             false => {
                 merkle_hash(transactions.iter().map(|x| x.hash.clone()).collect())
-                .expect("Block::new().merkle_hash failed") 
+                .expect("Block::new().merkle_hash failed")
             }
         };
         Block {
@@ -195,8 +206,37 @@ impl Block {
         hash
     }
 
-    pub fn validate(&self) -> bool { // TODO: check if block is valid
-        true
+    pub fn validate(&self) -> Result<(), BlockError> {
+        // check if values of block are valid
+        let sha256_re = Regex::new("^[a-fA-F0-9]{64}$").unwrap();
+        let datetime_re = Regex::new(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\d{3}\+\d{2}:\d{2})$").unwrap();
+        
+        // regex checks
+        if sha256_re.captures(&self.previous_hash).is_none() { return Err(BlockError::MismatchPreviousHash) } // check previous hash
+        if datetime_re.captures(&self.datetime).is_none() { return Err(BlockError::MismatchDate) } // check date
+        if self.clone().calc_hash(self.nonce) != self.hash { return Err(BlockError::MismatchHash) } // check hash
+
+        // check transactions
+        for t in &self.transactions {
+            match t.validate() {
+                Ok(()) => continue,
+                Err(e) => {
+                    println!("transaction invalid: {:?}", e);
+                    return Err(BlockError::TransactionValidationFailed);
+                },
+            }
+        }
+
+        // recreate merkle hash to validate
+        let merkle = match self.transactions.is_empty() {
+            true => { String::new() }
+            false => {
+                merkle_hash(self.transactions.iter().map(|x| x.hash.clone()).collect())
+                .expect("Block::validate().merkle_hash failed")
+            }
+        };
+        if merkle != self.merkle { return Err(BlockError::MismatchMerkleHash) } // check merkle hash
+        Ok(())
     }
 
     pub fn as_json(&self) -> serde_json::Value{
@@ -212,7 +252,7 @@ impl Block {
         })
     }
 
-    pub fn from_json(json: serde_json::Value) -> Block { // TODO: some strings are parsed wrong
+    pub fn from_json(json: serde_json::Value) -> Block {
         // deserialize transactions
         let mut transactions: Vec<Transaction> = Vec::new();
 
@@ -227,14 +267,15 @@ impl Block {
         let mut block = Self::new(
             json.get("index").unwrap().as_u64().expect("Block::from_json: index"),
             transactions, 
-            json.get("previous_hash").unwrap().to_string()
+            json.get("previous_hash").unwrap().to_string().replace("\"", ""),
         );
 
         // update values
-        block.datetime = json.get("datetime").unwrap().to_string();
+        block.datetime = json.get("datetime").unwrap().to_string().replace("\"", "");
         block.nonce = json.get("nonce").unwrap().as_u64().expect("Block::from_json: nonce");
-        block.hash = json.get("hash").unwrap().to_string();
-        block.merkle = json.get("merkle").unwrap().to_string();
+        block.hash = json.get("hash").unwrap().to_string().replace("\"", "");
+        block.merkle = json.get("merkle").unwrap().to_string().replace("\"", "");
+        block.hash_str = format!("{}${}${}", block.index, block.datetime, block.merkle);
         block
     }
 
@@ -282,16 +323,20 @@ impl BlockChain {
         self.chain = chain;
     }
 
-    pub fn get_latest(&self) -> Block {
-        self.chain.last().unwrap().clone()
+    pub fn get_latest(&self) -> Result<Block, ()> {
+        // check if none
+        let latest = self.chain.last();
+        if latest.is_none() { Err(()) }
+        else { Ok(latest.unwrap().clone()) }
     }
 
     pub fn add_block(&mut self, block: &Block) -> Result<(), BlockChainError> {
         // check if block already in chain
-        if self.chain.contains(&block) {
-            return Err(BlockChainError::DuplicatedBlock);
+        if self.chain.contains(block) {
+            return Err(BlockChainError::BlockAlreadyInChain);
         }
-        // TODO: block.validate()
+
+        // TODO: check if block is allowed to append to chain
         if block.hash.is_empty() { // check if block is valid (actually unnacessary)
             return Err(BlockChainError::InvalidBlock);
         }
