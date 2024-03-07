@@ -38,10 +38,10 @@ fn main() {
     // println!("{:?}", Transaction::new(&Uuid::new_v4().to_string(), &Uuid::new_v4().to_string(), 0.8, false).as_json().to_string());
     
     // # block
-    let transactions_test = [Transaction::new(&Uuid::new_v4().to_string(), &Uuid::new_v4().to_string(), 0.4, false), Transaction::new(&Uuid::new_v4().to_string(), &Uuid::new_v4().to_string(), 0.8, false)];
-    let mut block = Block::new(0, transactions_test.to_vec(), hash_str("avocado".as_bytes()));
-    block.calc_hash(2);
-    println!("{:?}", block.as_json().to_string());
+    // let transactions_test = [Transaction::new(&Uuid::new_v4().to_string(), &Uuid::new_v4().to_string(), 0.4, false), Transaction::new(&Uuid::new_v4().to_string(), &Uuid::new_v4().to_string(), 0.8, false)];
+    // let mut block = Block::new(1, transactions_test.to_vec(), hash_str("avocado".as_bytes()));
+    // block.calc_hash(2);
+    // println!("{:?}", block.as_json().to_string());
 
 
     // get args
@@ -127,7 +127,8 @@ fn main() {
                     },
                 }
 
-                match blockchain.add_block(&block) { // add block to chain FIXME: block added even already in chain
+                // add block to chain
+                match blockchain.add_block(&block) {
                     Ok(_) => println!("# block added"),
                     Err(e) => eprintln!("# block not added because of: {:?}", e),
                 }

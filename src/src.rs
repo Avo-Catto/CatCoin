@@ -331,14 +331,16 @@ impl BlockChain {
     }
 
     pub fn add_block(&mut self, block: &Block) -> Result<(), BlockChainError> {
+        // add block to chain
         // check if block already in chain
         if self.chain.contains(block) {
-            return Err(BlockChainError::BlockAlreadyInChain);
+            return Err(BlockChainError::BlockAlreadyInChain)
         }
 
-        // TODO: check if block is allowed to append to chain
-        if block.hash.is_empty() { // check if block is valid (actually unnacessary)
-            return Err(BlockChainError::InvalidBlock);
+        // check index
+        match self.chain.last() {
+            Some(n) => if n.index + 1 != block.index { return Err(BlockChainError::InvalidIndex) },
+            None => if block.index != 0 { return Err(BlockChainError::InvalidIndex) },
         }
         self.chain.push(block.clone()); // add block to chain
         Ok(())

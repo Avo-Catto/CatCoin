@@ -6,7 +6,7 @@ pub enum PoolError {
 #[derive(Debug)]
 pub enum BlockChainError {
     BlockAlreadyInChain,
-    InvalidBlock
+    InvalidIndex
 }
 
 #[derive(Debug)]
