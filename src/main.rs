@@ -1,6 +1,6 @@
 // use crate::src::{merkle_hash, Block, BlockChain, Transaction, TransactionPool};
 use src::BlockChain;
-use std::{io::{Read, Write}, net::{TcpListener, Shutdown}, thread, sync::Mutex};
+use std::{borrow::{Borrow, BorrowMut}, io::{Read, Write}, net::{Shutdown, TcpListener}, sync::{Arc, Mutex}, thread};
 use serde::Deserialize;
 use serde_json::json;
 use clap::Parser;
@@ -14,6 +14,11 @@ mod errors;
 struct Receiver {
     dtype: i8,
     data: serde_json::Value
+}
+
+enum ReceivedValue {
+    TransactionVal(Transaction),
+    BlockVal(Block),
 }
 
 #[derive(Parser, Debug)]
@@ -32,35 +37,17 @@ struct Args {
 }
 
 fn main() {
-
-    // # transaction
-    // println!("{:?}", Transaction::new(&Uuid::new_v4().to_string(), &Uuid::new_v4().to_string(), 0.4, false).as_json().to_string());
-    // println!("{:?}", Transaction::new(&Uuid::new_v4().to_string(), &Uuid::new_v4().to_string(), 0.8, false).as_json().to_string());
-    
-    // # block
-    // let transactions_test = [Transaction::new(&Uuid::new_v4().to_string(), &Uuid::new_v4().to_string(), 0.4, false), Transaction::new(&Uuid::new_v4().to_string(), &Uuid::new_v4().to_string(), 0.8, false)];
-    // let mut block = Block::new(1, transactions_test.to_vec(), hash_str("avocado".as_bytes()));
-    // block.calc_hash(2);
-    // println!("{:?}", block.as_json().to_string());
-
-
     // get args
     let args = Args::parse();
     println!("{:#?}", args);
 
-    /*
-    let mut blockchain = match args.genisis {
-        true => Mutex::new(BlockChain::new_with_genisis()),
-        false => Mutex::new(BlockChain::new()),
-    };
-    */
+    // construct transactionpool and blockchain as mutex
     let mut transactionpool = TransactionPool::new();
     let mut blockchain = match args.genisis {
         true => BlockChain::new_with_genisis(),
         false => BlockChain::new(),
     };
 
-    // #### Communication ####
     // format address
     let addr = format!("{}:{}", args.ip, args.port);
     println!("listening on: {}", addr);
@@ -68,8 +55,13 @@ fn main() {
     // create listener
     let listener: TcpListener = TcpListener::bind(addr).unwrap();
     for stream in listener.incoming() {
-        // thread::spawn(move || { // spawn thread and handle connection
 
+        // manage output
+        let output: Arc<Mutex<Result<ReceivedValue, ()>>> = Arc::new(Err(()).into());
+        let output_clone = Arc::clone(&output);
+
+        // spawn thread and handle connection
+        let res = thread::spawn(move || {
             // overwriting stream
             let mut stream = stream.unwrap();
 
@@ -78,7 +70,7 @@ fn main() {
             stream.read_to_string(&mut buffer).unwrap();
             stream.shutdown(Shutdown::Read).unwrap();
 
-            println!("{}", buffer);
+            println!("{}", buffer); // DEBUG
 
             // load json from buffer
             let data: Receiver = match serde_json::from_str(&buffer) {
@@ -93,6 +85,9 @@ fn main() {
             stream.write(format!("{{\"res\": {t} }}", t=data.dtype).as_bytes()).unwrap();
             stream.shutdown(Shutdown::Write).unwrap();
 
+            // output
+            let mut out = output_clone.lock().unwrap();
+
             // add Transaction
             if data.dtype == 1 {
                 // construct transaction
@@ -103,15 +98,11 @@ fn main() {
                     Ok(()) => println!("# transaction valid"),
                     Err(e) => {
                         eprintln!("# transaction invalid: {:?}", e);
-                        continue
                     },
                 }
-                
-                // add transaction to pool
-                match transactionpool.add(&transaction) {
-                    Ok(_) => println!("# transaction added"),
-                    Err(e) => eprintln!("# transaction not added because of: {:?}", e),
-                }
+
+                // set transaction as output
+                *out = Ok(ReceivedValue::TransactionVal(transaction));
             
             // add Block
             } else if data.dtype == 2 {
@@ -123,22 +114,54 @@ fn main() {
                     Ok(()) => println!("# block valid"),
                     Err(e) => {
                         eprintln!("# block invalid: {:?}", e);
-                        continue
+                        return
                     },
                 }
 
-                // add block to chain
-                match blockchain.add_block(&block) {
-                    Ok(_) => println!("# block added"),
-                    Err(e) => eprintln!("# block not added because of: {:?}", e),
-                }
-                // blockchain.lock();
-                // blockchain.get_mut().unwrap().add_block(&block).expect("received block couldN't be appended to blockchain");
-            }
+                // set block as output
+                *out = Ok(ReceivedValue::BlockVal(block));
+            } else { *out = Err(()) }
 
-            // debug
-            println!("Transactions: \n{}", transactionpool.str());
-            println!("Blockchain: {}\n\n\n", blockchain.str());
-        // });
-    }
+            // drop output
+            drop(out);
+        });
+
+        res.join().unwrap();
+
+        // add transaction / block to pool / chain
+        match output.lock().unwrap().as_ref() {
+            Ok(n) => {
+                match n {
+                    // add transaction to pool
+                    ReceivedValue::TransactionVal(n) => {
+                        match transactionpool.add(&n) {
+                            Ok(_) => println!("# transaction added"),
+                            Err(e) => eprintln!("# transaction not added because of: {:?}", e),
+                        }
+                    },
+
+                    // add block to chain
+                    ReceivedValue::BlockVal(n) => {
+                        match blockchain.add_block(&n) {
+                            Ok(_) => println!("# block added"),
+                            Err(e) => eprintln!("# block not added because of: {:?}", e),
+                        }
+                    },
+                }
+            },
+        Err(_) => eprintln!("# nothing was added"),
+        };
+
+        // debug
+        println!("Transactions: \n{}", transactionpool.str());
+        println!("Blockchain: {}\n\n\n", blockchain.str());
+
+    };
+
 }
+
+// TODO: implement multi threading (look at how multithreaded web sockets are made in rust)
+// TODO: implement database for a list of peers
+// TODO: add dtype 3 for receiving messages to add/get peers with distribute option
+// TODO: make it more Bitcoin like -> https://developer.bitcoin.org/devguide/index.html
+// TODO: improve logging
