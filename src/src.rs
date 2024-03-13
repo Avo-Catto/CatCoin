@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{str::FromStr, error::Error};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use chrono::Utc;
@@ -11,9 +11,7 @@ pub fn datetime_now() -> String {
 
 pub fn hash_str(data: &[u8]) -> String {
     // hash data
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    format!("{:X}", hasher.finalize()) // return hex value as String
+    format!("{:x}", Sha256::digest(data))
 }
 
 pub fn merkle_hash(data: Vec<String>) -> Result<String, ()> {
@@ -22,7 +20,7 @@ pub fn merkle_hash(data: Vec<String>) -> Result<String, ()> {
     let even: bool = match len % 2 {
         1 => true,
         0 => false,
-        _ => false, // this case will never happen
+        _ => false, // this will never happen
     };
 
     // merge hash
@@ -52,7 +50,7 @@ pub struct Transaction {
     dst: String,
     date: String,
     val: f64,
-    broadcast: bool,
+    pub broadcast: bool,
     hash: String,
 }
 
@@ -73,7 +71,7 @@ impl Transaction {
         }
     }
 
-    pub fn from_json(json: serde_json::Value) -> Transaction {
+    pub fn from_json(json: &serde_json::Value) -> Result<Transaction, ()> { // TODO: error handling
         // construct transaction from json
         let mut transaction = Self::new(
             json.get("src").unwrap().as_str().expect("Transaction::from_json: src"),
@@ -83,7 +81,7 @@ impl Transaction {
         );
         transaction.date = json.get("date").unwrap().to_string().replace("\"", "");
         transaction.hash = json.get("hash").unwrap().to_string().replace("\"", "");
-        transaction
+        Ok(transaction)
     }
 
     pub fn as_json(&self) -> serde_json::Value {
@@ -104,7 +102,7 @@ impl Transaction {
         hash_str(hash_fmt.as_bytes())
     }
 
-    pub fn validate(&self) -> Result<(), TVE> {
+    pub fn validate(&self) -> Result<(), TVE> { // TODO: refactor regex checks using "is_match"
         // check if values of transaction are valid
         let uuid_re = Regex::new("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$").unwrap();
         let datetime_re = Regex::new(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\d{3}\+\d{2}:\d{2})$").unwrap();
@@ -167,7 +165,7 @@ pub struct Block {
     pub index: u64,
     datetime: String,
     transactions: Vec<Transaction>,
-    previous_hash: String,
+    pub previous_hash: String,
     pub nonce: u64,
     pub hash: String,
     merkle: String,
@@ -206,7 +204,8 @@ impl Block {
         hash
     }
 
-    pub fn validate(&self) -> Result<(), BlockError> {
+    // TODO: refactor regex checks using "is_match"
+    pub fn validate(&self) -> Result<(), BlockError> { // TODO: add / check hash difficulty
         // check if values of block are valid
         let sha256_re = Regex::new("^[a-fA-F0-9]{64}$").unwrap();
         let datetime_re = Regex::new(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\d{3}\+\d{2}:\d{2})$").unwrap();
@@ -252,14 +251,29 @@ impl Block {
         })
     }
 
-    pub fn from_json(json: serde_json::Value) -> Block {
+    pub fn from_json(json: &serde_json::Value) -> Result<Block, ()> { // TODO: improve error return
         // deserialize transactions
+        let json = json.clone();
+
+        println!("hash: {:#?}", json); //debug
+        println!("index: {:?}", json.get("index")); //debug
+
         let mut transactions: Vec<Transaction> = Vec::new();
+        let data = json.get("transactions");
 
         // iterate through transactions
-        if let Some(i) = json.get("transactions").unwrap().as_array() {
-            for t in i {
-                transactions.push(Transaction::from_json(t.clone())); // construct transactions
+        if data.is_some() {
+            for t in data.unwrap().as_array().unwrap() {
+                // construct transactions
+                match Transaction::from_json(t) {
+                    Ok(n) => transactions.push(n),
+                    Err(_) => break,
+                };
+            }
+
+            // check if transaction construction failed
+            if transactions.len() < data.unwrap().as_array().unwrap().len() {
+                return Err(());
             }
         }
 
@@ -276,7 +290,7 @@ impl Block {
         block.hash = json.get("hash").unwrap().to_string().replace("\"", "");
         block.merkle = json.get("merkle").unwrap().to_string().replace("\"", "");
         block.hash_str = format!("{}${}${}", block.index, block.datetime, block.merkle);
-        block
+        Ok(block)
     }
 
     pub fn str(&self) -> String {
