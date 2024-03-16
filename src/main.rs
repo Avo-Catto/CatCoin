@@ -1,12 +1,10 @@
-use src::BlockChain;
-use std::{borrow::Borrow, fmt::format, io::{Read, Write}, net::{Shutdown, TcpListener, TcpStream}, panic::catch_unwind, sync::{Arc, Mutex}, thread};
+use std::{io::Read, net::{Shutdown, TcpListener, TcpStream}, process::Command, sync::{Arc, Mutex}, thread};
 use serde::Deserialize;
 use serde_json::json;
-use clap::{builder::Str, Parser};
-use regex::Regex;
-use crate::src::{Block, Transaction, TransactionPool};
-use std::error::Error;
+use clap::Parser;
+use crate::src::{broadcast, check_addr, respond_code, respond_json, subtract_vec, send_string, Block, BlockChain, Transaction, TransactionPool};
 use std::process::exit;
+use num_bigint::BigUint;
 
 mod src;
 mod errors;
@@ -39,70 +37,25 @@ struct Args {
 
     /// entry node to join the network
     #[arg(short, long, default_value_t = String::from("127.0.0.1:8000"))]
-    entry: String
-}
+    entry: String,
 
-fn check_addr(addr: &String) -> bool {
-    // check peer address; for example "127.0.0.1:8080"
-    let addr_re = Regex::new(
-        r"^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?):(\d{1,5})$"
-    ).unwrap();
-    addr_re.is_match(addr)
-}
-
-fn respond_code(mut stream: &TcpStream, code: i8) {
-    // respond code
-    stream.write(format!("{{\"res\": {code}}}").as_bytes()).unwrap();
-    stream.shutdown(Shutdown::Write).unwrap();
-}
-
-fn respond_json(mut stream: &TcpStream, json: serde_json::Value) {
-    // respond json
-    stream.write(format!("{{\"res\": 0, \"data\": {data}}}", data=json.to_string()).as_bytes()).unwrap();
-    stream.shutdown(Shutdown::Write).unwrap();
-}
-
-fn send_string(mut stream: &TcpStream, data: String) -> String {
-    // send data to other node
-    stream.write(data.as_bytes()).unwrap();
-    stream.shutdown(Shutdown::Write).unwrap();
-
-    // read response
-    let mut buffer = String::new();
-    stream.read_to_string(&mut buffer).unwrap();
-    buffer
-}
-
-fn get_chain(addr: &String) -> Result<Vec<serde_json::Value>, Box<dyn Error>> {
-    // connect to node
-    let stream = match TcpStream::connect(addr) {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!("[#] get-chain() - error: {}", e);
-            return Err(Box::new(e));
-        }
-    };
-
-    let buffer = send_string(&stream, "{\"dtype\":4, \"data\":{}}".to_string());
-
-    // load json from buffer
-    let data: ResponseReceiver = match serde_json::from_str(&buffer) {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!("[#] get-chain() - error: {}", e);
-            return Err(Box::new(e));
-        },
-    };
-    Ok(vec![data.data])
+    /// hash difficulty
+    #[arg(short, long, default_value_t = 14)]
+    difficulty: u8,
 }
 
 fn main() {
     // get args
     let args = Args::parse();
 
-    // debug
-    println!("{:#?}", args);
-    let mut counter: u8 = 0;
+    // format address
+    let addr = format!("{}:{}", args.ip, args.port);
+
+    // set hash difficulty
+    let pat = "F".repeat(usize::from(args.difficulty));
+    let to = "0".repeat(usize::from(args.difficulty));
+    let hex_str = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF".replacen(&pat, &to, 1);
+    let difficulty = BigUint::parse_bytes(hex_str.as_bytes(), 16).unwrap();
 
     // construct mutex objects
     let peers = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -111,64 +64,233 @@ fn main() {
         true => Arc::new(Mutex::new(BlockChain::new_with_genisis())),
         false => Arc::new(Mutex::new(BlockChain::new())),
     };
-
+    
     // get blockchain from another node
     if !args.genisis && check_addr(&args.entry) {
-        println!("[+] updating chain from node: {}", args.entry);
+        println!("[+] SYNC - updating blockchain");
         
-        // connect to node & receive blockchain
-        match get_chain(&args.entry) {
-            Ok(n) => {
-                // deserialize blocks
-                let mut chain: Vec<Block> = Vec::new();
-                for i in n {
-                    // construct block
-                    match Block::from_json(&i[0]) {
-                        Ok(n) => chain.push(n),
-                        Err(_) => {
-                            eprintln!("[#] failed parsing block");
-                            exit(1);
-                        },
-                    };
-                }
-                // add blocks to chain
-                let mut blockchain = blockchain.lock().unwrap();
-                blockchain.set_chain(chain);
-                drop(blockchain);
-                println!("[+] blockchain updated successfully")
-            },
+        // connect to node
+        let stream = match TcpStream::connect(&args.entry) {
+            Ok(n) => n,
             Err(e) => {
-                panic!("[#] failed updating chain {}", e);
+                eprintln!("[#] SYNC - connection error: {}", e);
+                exit(1);
             }
+        };
+
+        // request and receive blockchain
+        let buffer = match send_string(&stream, "{\"dtype\":5, \"data\":{}}".to_string()) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[#] SYNC - receive chain error: {}", e);
+                exit(1);
+            },
+        };
+
+        // load json from buffer
+        let json: ResponseReceiver = match serde_json::from_str(&buffer) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[#] SYNC - parsing blockchain error: {}", e);
+                exit(1);
+            },
+        };
+
+        // construct blocks from json
+        let rcvd_chain = json.data.as_array().unwrap().to_vec();
+        let mut chain: Vec<Block> = Vec::new();
+        for i in rcvd_chain {
+            // construct block
+            match Block::from_json(&i) {
+                Ok(n) => chain.push(n),
+                Err(e) => {
+                    eprintln!("[#] SYNC - parsing block error: {:?}", e);
+                    exit(1);
+                },
+            };
         }
-    } else if !args.genisis { // if no entry node specified
-        eprintln!("[#] no entry node specified");
+
+        // add blocks to chain
+        let mut blockchain = blockchain.lock().unwrap();
+        blockchain.set_chain(chain);
+        drop(blockchain);
+        println!("[+] SYNC - blockchain update successful");
+
+    // if no entry node specified
+    } else if !args.genisis {
+        eprintln!("[#] SYNC - no entry node specified");
         exit(1);
     }
 
-    // TODO: get peer list
-    // TODO: send address to all peers
+    // synchronizing transaction pool & list of peers
+    if !args.genisis {
+        // get transaction pool
+        println!("[+] SYNC - updating transaction pool");
 
-    // debug
-    println!("Genisis Hash: {}", blockchain.lock().unwrap().get_latest().unwrap().hash);
+        // connect to node
+        let stream = match TcpStream::connect(&args.entry) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[#] SYNC - connection error: {}", e);
+                exit(1);
+            },
+        };
 
-    // format address
-    let addr = format!("{}:{}", args.ip, args.port);
-    println!("listening on: {}", addr);
+        // receive transaction pool
+        let buffer = match send_string(&stream, String::from("{\"dtype\": 3, \"data\":{}}")) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[#] SYNC - receive transaction pool error: {}", e);
+                exit(1);
+            },
+        };
+
+        // load json from buffer
+        let json: ResponseReceiver = match serde_json::from_str(&buffer) {
+            Ok(n) => n,
+            Err(e) => {
+                respond_code(&stream, 1);
+                eprintln!("[#] SYNC - failed parsing transaction pool: {}", e);
+                exit(1);
+            },
+        };
+
+        // cast json into vector
+        let transactions = json.data.as_array().unwrap().to_vec();
+
+        // update transactions if any
+        if transactions.len() > 0 {
+            // construct transactions from json
+            let mut rcvd_pool: Vec<Transaction> = Vec::new();
+            for i in transactions {
+                // construct Transaction
+                match Transaction::from_json(&i) {
+                    Ok(n) => &rcvd_pool.push(n),
+                    Err(_) => continue,
+                };
+            }
+
+            // validate transactions
+            let mut rm: Vec<Transaction> = Vec::new();
+            for t in &rcvd_pool {
+                match t.validate() {
+                    Ok(_) => continue,
+                    Err(_) => rm.push(t.clone()),
+                }
+            }
+
+            // log
+            if rm.len() > 0 {
+                println!("[!] SYNC - invalid transactions removed: {}", rm.len());
+            }
+
+            // remove invalid transactions & update transaction pool
+            let mut pool = transactionpool.lock().unwrap();
+            *pool = TransactionPool::from_vec(&rcvd_pool);
+            drop(pool);
+            println!("[+] SYNC - update transaction pool successful");
+        
+        } else {
+            println!("[+] SYNC - no update required");
+        }
+
+        // get list of peers
+        println!("[+] SYNC - updating list of peers");
+
+        // connect to node
+        let stream = match TcpStream::connect(&args.entry) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[#] SYNC - connection error: {}", e);
+                exit(1);
+            },
+        };
+
+        // receive list of peers
+        let buffer = match send_string(&stream, String::from("{\"dtype\": 1, \"data\":{}}")) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[#] SYNC - receive list of peers error: {}", e);
+                exit(1);
+            }
+        };
+        
+        // load json from buffer
+        let json: ResponseReceiver = match serde_json::from_str(&buffer) {
+            Ok(n) => n,
+            Err(e) => {
+                respond_code(&stream, 1);
+                eprintln!("[#] SYNC - failed parsing peers: {}", e);
+                exit(1);
+            },
+        };
+
+        // validate peers
+        let mut peers = peers.lock().unwrap();
+        *peers = json.data.as_array().unwrap().iter().map(|x| x.to_string().replace("\"", "")).collect();
+        
+        // find invalid peers
+        let mut rm: Vec<String> = Vec::new();
+        for peer in peers.clone() {
+            if !check_addr(&peer) {
+                rm.push(peer);
+            }
+        }
+
+        // log
+        if rm.len() > 0 {
+            println!("[!] SYNC - invalid peers removed: {}", rm.len());
+        }
+
+        // remove invalid peers
+        *peers = subtract_vec(peers.to_vec(), rm);
+        peers.push(args.entry.clone()); // add entry node
+
+        // broadcast address to peers
+        println!("[+] SYNC - broadcasting address");
+        rm = broadcast(&peers, 0, &format!("{{\"addr\":\"{}\"}}", addr));
+        
+        // remove unreachable peers & update peers
+        *peers = subtract_vec(peers.to_vec(), rm);
+        drop(peers);
+        println!("[+] SYNC - update list of peers successful");
+    }
+
+    // TODO: run miner in thread? does it have to be a thread?
+    // start miner
+
+    let mut miner = match Command::new("cargo").args(["run", "--bin", "miner"]).spawn() {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("[#] SETUP - miner compilation failed: {}", e);
+            exit(1);
+        },
+    };
+
+    match miner.wait() {
+        Ok(n) => println!("[+] SETUP - miner compilation succeed: {}", n),
+        Err(e) => {
+            eprintln!("[#] SETUP - miner compilation failed: {}", e);
+            exit(1);
+        }
+    }
+
+    // log stuff
+    println!("[+] SETUP - listening on: {}", addr);
+    println!("[+] SETUP - genisis hash: {}", blockchain.lock().unwrap().get_latest().unwrap().hash);
 
     // create listener
     let listener: TcpListener = TcpListener::bind(addr).unwrap();
     for stream in listener.incoming() {
-        // debug
-        counter += 1;
 
         // clone mutex instances
         let peers = Arc::clone(&peers);
         let transactionpool = Arc::clone(&transactionpool);
         let blockchain = Arc::clone(&blockchain);
+        let difficulty = difficulty.clone();
 
         // spawn thread and handle connection
-        let t = thread::spawn( move || {
+        let _ = thread::spawn( move || {
             // overwriting stream
             let mut stream = stream.unwrap();
 
@@ -182,12 +304,10 @@ fn main() {
                 Ok(n) => n,
                 Err(e) => {
                     respond_code(&stream, 1);
-                    eprintln!("# receiving of data failed: {}", e);
+                    eprintln!("[#] LISTENER - receive data error: {}", e);
                     return;
                 },
             };
-
-            println!("{:#?}", data.data.as_object()); // debug
 
             // add peer
             if data.dtype == 0 {
@@ -212,11 +332,16 @@ fn main() {
                     return;
                 }
 
-                // add peer to list
+                // add peer to list if not already contained
                 let mut peers = peers.lock().unwrap();
-                peers.push(peer);
-                respond_code(&stream, 0);
-                drop(peers);
+                if !peers.contains(&peer) {
+                    // if not in list
+                    peers.push(peer);
+                    respond_code(&stream, 0);
+                    drop(peers);
+                
+                // if already in list
+                } else { respond_code(&stream, 0); }
             
             // get peers
             }  else if data.dtype == 1 {
@@ -228,16 +353,16 @@ fn main() {
                 // construct transaction
                 let transaction = match Transaction::from_json(&data.data) {
                     Ok(n) => n,
-                    Err(_) => {
+                    Err(e) => {
                         respond_code(&stream, 1);
-                        eprintln!("[#] DTYPE:0 - Transaction::from_json() failed");
+                        eprintln!("[#] DTYPE:0 - construction failed: {:?}", e);
                         return;
                     },
                 };
 
                 // perform some checks on the transaction
                 match transaction.validate() {
-                    Ok(_) => println!("[+] DTYPE:1 - transaction valid"),
+                    Ok(_) => {},
                     Err(e) => {
                         respond_code(&stream, 1);
                         eprintln!("[#] DTYPE:1 - transaction invalid: {:?}", e);
@@ -254,47 +379,36 @@ fn main() {
                     transaction.broadcast = false; // disable broadcast
                     let transaction = transaction.as_json().to_string(); // serialize transaction
 
-                    // iterate through peers and connect to them
-                    for peer in peers.clone() {
-                        let stream = match TcpStream::connect(peer.clone()) {
-                            Ok(n) => n,
-                            
-                            // if connection fails get index and remove from list
-                            Err(e) => {
-                                let idx = peers.iter().position(|x| x == &peer).unwrap();
-                                peers.remove(idx);
-                                eprintln!("[#] DTYPE:1 - removed peer: {:?}", e);
-                                continue;
-                            }
-                        };
-                        // send transaction to peer
-                        send_string(&stream, format!("{{\"dtype\": 1, \"data\": {t}}}", t=transaction));
-                        println!("[+] DTYPE:1 - data sent");
+                    // broadcast peers
+                    let failed = broadcast(&peers, 2, &transaction);
 
-                        println!("{}", buffer); // debug
-                        println!("[+] DTYPE:1 - sent transaction to {}", peer);
-                    }
+                    // remove unreachable peers
+                    *peers = subtract_vec(peers.to_vec(), failed);
+                    drop(peers);
                 }
 
                 // add transaction to pool
                 let mut pool = transactionpool.lock().unwrap();
                 match pool.add(&transaction) {
                     Ok(_) => {
-                        // debug
-                        println!("# transaction added");
-                        println!("# pool:\n{}", pool.str());
+                        println!("[+] DTYPE:1 - transaction added\n\n{}", transaction.str());
                         respond_code(&stream, 0);
                         drop(pool);
                     },
                     Err(e) => {
                         respond_code(&stream, 1);
-                        eprintln!("# transaction not added because of: {:?}", e);
+                        eprintln!("[#] DTYPE:1 - transaction not added: {:?}", e);
                         return;
                     },
                 }
             
-            // validate block
+            // get transaction pool
             } else if data.dtype == 3 {
+                // respend transaction pool
+                respond_json(&stream, json!(*transactionpool.lock().unwrap().pool));
+
+            // validate block
+            } else if data.dtype == 4 { // TODO: add kill mining block and append received block to chain if valid and start mining next block
                 // construct block
                 let block = match Block::from_json(&data.data) {
                     Ok(n) => n,
@@ -304,7 +418,7 @@ fn main() {
                         return;
                     },
                 };
-                
+
                 // check integrity in blockchain
                 let chain = blockchain.lock().unwrap();
                 match chain.get_latest() {
@@ -341,74 +455,26 @@ fn main() {
                         return;
                     }
                 }
-            
+
             // request blockchain
-            } else if data.dtype == 4 {
+            } else if data.dtype == 5 {
+                // respond blockchain
                 let chain = blockchain.lock().unwrap();
                 let blocks: Vec<serde_json::Value> = chain.get_chain().iter().map(|x| x.as_json()).collect();
                 respond_json(&stream, json!(blocks));
                 return;
-
-            // add Block
-            } else if data.dtype == -1 {
-                // construct block
-                let mut block = match Block::from_json(&data.data) {
-                    Ok(n) => n,
-                    Err(_) => {
-                        respond_code(&stream, 1);
-                        return;
-                    }
-                };
-                let mut chain = blockchain.lock().unwrap();
-                
-                // debug
-                block.index = chain.get_latest().unwrap().index + 1;
-                
-                // perform some checks on block
-                match block.validate() {
-                    Ok(()) => println!("# block valid"),
-                    Err(e) => {
-                        eprintln!("# block invalid: {:?}", e);
-                        return
-                    },
-                }
-
-                //add block to chain // TODO: change it to make it update the blockchain than rather only receiving blocks and appending them
-                match chain.add_block(&block) {
-                    Ok(_) => {
-                        println!("# block added");
-                        println!("# chain: {}", chain.str()); // debug
-                        drop(chain);
-                    },
-                    Err(e) => eprintln!("# block not added because of: {:?}", e),
-                }
             }
         });
-        
-        // debug
-        if counter >= 10 {
-            t.join().unwrap();
-            println!("break now!");
-            break;
-        }
     };
-
-    // debug
-    let transactionpool = transactionpool.lock().unwrap();
-    println!("transactions:\n{}", transactionpool.str());
-    let peers = peers.lock().unwrap();
-    println!("peers: {:?}", peers)
-
 }
 
-// TODO: add "get blockchain" functionality to socket
-// TODO: implement multi threading (look at how multithreaded web sockets are made in rust)
-// TODO: implement database for a list of peers
-// TODO: add dtype 3 for receiving messages to add/get peers with distribute option
-// TODO: add mined block confirmation by other nodes
-// TODO: make it more Bitcoin like -> https://developer.bitcoin.org/devguide/index.html
+// TODO: implement multi threading (look at how multithreaded web sockets are made in rust) (currently working on)
+// TODO: add Docs to functions
+// TODO: add mined block confirmation by other nodes and kill mining process of current block if nonce found by another node
+// TODO: make it more Bitcoin like? -> https://developer.bitcoin.org/devguide/index.html
 // TODO: improve returning errors by using Result<val, Error> instead of Result<val, ()>
 // TODO: improve logging
 // TODO: remove everyhthing with //debug comment
-// TODO: save blockchain to continue later
+// TODO: save blockchain to continue later?
+// TODO: cleanup imports
 // Resource: https://medium.com/learning-lab/how-cryptocurrencies-work-technical-guide-95950c002b8f

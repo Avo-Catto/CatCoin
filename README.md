@@ -1,11 +1,17 @@
+- **Run the Project**
+
+      cargo run --bin Cryptocurrency_Simulator -- --genisis
+
 - **Node Communication DTypes**
 
     - **DTYPE:**
-        - ? **0** - alive?
-        - **1** - add transaction to transaction pool
-        - **2** - validate block
-        - **3** - update blockchain; aka receive a list of blocks (shouldn't be open)
-    
+        - **0** - add peer
+        - **1** - get list of peers
+        - **2** - add transaction
+        - **3** - get transaction pool
+        - **4** - validate block
+        - **5** - get blockchain
+
     - **Response:**
         - **0** - success
         - **1** - error

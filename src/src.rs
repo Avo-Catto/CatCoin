@@ -1,8 +1,11 @@
-use std::{str::FromStr, error::Error};
+use std::{env, error::Error, io::{Read, Write}, net::{Shutdown, TcpStream}, panic::catch_unwind, process::Command, str::FromStr, vec};
+use num_bigint::BigUint;
+use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use chrono::Utc;
 use regex::Regex;
+use std::any::Any;
 use crate::errors::{BlockChainError, PoolError, BlockError, TransactionValidationError as TVE};
 
 pub fn datetime_now() -> String {
@@ -44,14 +47,14 @@ pub fn merkle_hash(data: Vec<String>) -> Result<String, ()> {
     else { Err(()) } // raise error
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Serialize)]
 pub struct Transaction {
-    src: String,
-    dst: String,
-    date: String,
-    val: f64,
+    pub src: String,
+    pub dst: String,
+    pub date: String,
+    pub val: f64,
     pub broadcast: bool,
-    hash: String,
+    pub hash: String,
 }
 
 impl Transaction {
@@ -71,17 +74,20 @@ impl Transaction {
         }
     }
 
-    pub fn from_json(json: &serde_json::Value) -> Result<Transaction, ()> { // TODO: error handling
+    pub fn from_json(json: &serde_json::Value) -> Result<Transaction, Box<dyn Any + Send>> {
         // construct transaction from json
-        let mut transaction = Self::new(
-            json.get("src").unwrap().as_str().expect("Transaction::from_json: src"),
-            json.get("dst").unwrap().as_str().expect("Transaction::from_json: dst"),
-            json.get("val").unwrap().as_f64().expect("Transaction::from_json: val"),
-            json.get("broadcast").unwrap().as_bool().expect("Transaction::from_json: broadcast")
-        );
-        transaction.date = json.get("date").unwrap().to_string().replace("\"", "");
-        transaction.hash = json.get("hash").unwrap().to_string().replace("\"", "");
-        Ok(transaction)
+        let transaction = catch_unwind(|| {
+            let mut transaction = Self::new(
+                json.get("src").unwrap().as_str().expect("Transaction::from_json: src"),
+                json.get("dst").unwrap().as_str().expect("Transaction::from_json: dst"),
+                json.get("val").unwrap().as_f64().expect("Transaction::from_json: val"),
+                json.get("broadcast").unwrap().as_bool().expect("Transaction::from_json: broadcast")
+            );
+            transaction.date = json.get("date").unwrap().to_string().replace("\"", "");
+            transaction.hash = json.get("hash").unwrap().to_string().replace("\"", "");
+            transaction
+        });
+        transaction
     }
 
     pub fn as_json(&self) -> serde_json::Value {
@@ -124,8 +130,9 @@ impl Transaction {
     }
 }
 
+#[derive(Debug, Serialize)]
 pub struct TransactionPool {
-    pool: Vec<Transaction>,
+    pub pool: Vec<Transaction>,
 }
 
 impl TransactionPool {
@@ -147,6 +154,13 @@ impl TransactionPool {
         self.pool.clear();
     }
 
+    pub fn from_vec(vector: &Vec<Transaction>) -> TransactionPool {
+        // create transaction pool from vector
+        let mut pool = Self::new();
+        pool.pool = vector.clone();
+        pool
+    }
+
     pub fn str(&self) -> String {
         // create vector with capacity of count of transactions
         let lenght = self.pool.len();
@@ -156,15 +170,15 @@ impl TransactionPool {
         for transaction in &self.pool {
             output.push(transaction.str());
         }
-        output.join("\n\n") // return list of transactions as one String
+        output.join("\n") // return list of transactions as one String
     }
 }
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Block {
     pub index: u64,
-    datetime: String,
-    transactions: Vec<Transaction>,
+    pub datetime: String,
+    pub transactions: Vec<Transaction>,
     pub previous_hash: String,
     pub nonce: u64,
     pub hash: String,
@@ -251,13 +265,9 @@ impl Block {
         })
     }
 
-    pub fn from_json(json: &serde_json::Value) -> Result<Block, ()> { // TODO: improve error return
+    pub fn from_json(json: &serde_json::Value) -> Result<Block, Box<dyn Any + Send>> {
         // deserialize transactions
         let json = json.clone();
-
-        println!("hash: {:#?}", json); //debug
-        println!("index: {:?}", json.get("index")); //debug
-
         let mut transactions: Vec<Transaction> = Vec::new();
         let data = json.get("transactions");
 
@@ -267,13 +277,8 @@ impl Block {
                 // construct transactions
                 match Transaction::from_json(t) {
                     Ok(n) => transactions.push(n),
-                    Err(_) => break,
+                    Err(e) => return Err(Box::new(e)),
                 };
-            }
-
-            // check if transaction construction failed
-            if transactions.len() < data.unwrap().as_array().unwrap().len() {
-                return Err(());
             }
         }
 
@@ -326,6 +331,13 @@ impl BlockChain {
         let mut genisis_block = Block::new(0, Vec::new(), String::new()); // new block
         genisis_block.calc_hash(0); // calc hash of block
         let _ = chain.add_block(&genisis_block); // append block to chain
+
+        // debug
+        let mut genisis_block = Block::new(1, Vec::new(), String::new()); // new block
+        genisis_block.calc_hash(1); // calc hash of block
+        let _ = chain.add_block(&genisis_block); // append block to chain
+        // debug
+
         chain
     }
 
@@ -367,4 +379,74 @@ impl BlockChain {
         }
         output
     }
+}
+
+
+pub fn check_addr(addr: &String) -> bool {
+    // check peer address; for example "127.0.0.1:8080"
+    let addr_re = Regex::new(
+        r"^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?):(\d{1,5})$"
+    ).unwrap();
+    addr_re.is_match(addr)
+}
+
+pub fn respond_code(mut stream: &TcpStream, code: i8) {
+    // respond code
+    stream.write(format!("{{\"res\": {code}}}").as_bytes()).unwrap();
+    stream.shutdown(Shutdown::Write).unwrap();
+}
+
+pub fn respond_json(mut stream: &TcpStream, json: serde_json::Value) {
+    // respond json
+    stream.write(format!("{{\"res\": 0, \"data\": {data}}}", data=json.to_string()).as_bytes()).unwrap();
+    stream.shutdown(Shutdown::Write).unwrap();
+}
+
+pub fn send_string(mut stream: &TcpStream, data: String) -> Result<String, Box<dyn Error>> {
+    // write data to stream
+    match stream.write(data.as_bytes()) {
+        Ok(_) => {},
+        Err(e) => return Err(Box::new(e)),
+    }
+    // send EOF
+    match stream.shutdown(Shutdown::Write) {
+        Ok(_) => {},
+        Err(e) => return Err(Box::new(e)),
+    }
+    // read response
+    let mut buffer = String::new();
+    match stream.read_to_string(&mut buffer) {
+        Ok(_) => return Ok(buffer),
+        Err(e) => return Err(Box::new(e)),
+    }
+}
+
+pub fn broadcast(peers: &Vec<String>, dtype: i8, data: &String) -> Vec<String> {
+    // broadcast data to all nodes and return list of nodes where connection failed
+    let mut peers_failed: Vec<String> = Vec::new();
+    for peer in peers {
+        // connect to peer
+        let stream = match TcpStream::connect(peer) {
+            Ok(n) => n,
+            Err(e) => {
+                peers_failed.push(peer.clone());
+                eprintln!("[#] DTYPE:{} - connection failed: {:?}", dtype, e);
+                continue;
+            }
+        };
+        // send transaction to peer
+        send_string(&stream, format!("{{\"dtype\": {}, \"data\": {}}}", dtype, data));
+    }
+    // return peers where connection failed
+    peers_failed
+}
+
+pub fn subtract_vec<T: PartialEq>(mut x: Vec<T>, y: Vec<T>) -> Vec<T>{
+    for i in y {
+        match x.iter().position(|y| y == &i) {
+            Some(n) => x.remove(n),
+            None => continue,
+        };
+    }
+    x
 }
