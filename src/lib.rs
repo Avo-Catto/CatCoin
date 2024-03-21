@@ -1,12 +1,41 @@
-use std::{env, error::Error, io::{Read, Write}, net::{Shutdown, TcpStream}, panic::catch_unwind, process::Command, str::FromStr, vec};
+use std::{env, error::Error, fmt::format, io::{Read, Write}, net::{Shutdown, TcpStream}, panic::catch_unwind, process::{Child, Command}, str::FromStr, vec};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use num_bigint::BigUint;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use chrono::Utc;
 use regex::Regex;
 use std::any::Any;
-use crate::errors::{BlockChainError, PoolError, BlockError, TransactionValidationError as TVE};
+
+#[derive(Debug)]
+pub enum PoolError {
+    DuplicatedTransaction,
+}
+
+#[derive(Debug)]
+pub enum BlockChainError {
+    BlockAlreadyInChain,
+    InvalidIndex
+}
+
+#[derive(Debug)]
+pub enum TransactionValidationError {
+    MismatchSource,
+    MismatchDestination,
+    MismatchDate,
+    MismatchHash,
+}
+type TVE = TransactionValidationError;
+
+#[derive(Debug)]
+pub enum BlockError {
+    MismatchDate,
+    TransactionValidationFailed,
+    MismatchPreviousHash,
+    MismatchHash,
+    MismatchMerkleHash,
+}
 
 pub fn datetime_now() -> String {
     Utc::now().to_rfc3339()
@@ -47,7 +76,7 @@ pub fn merkle_hash(data: Vec<String>) -> Result<String, ()> {
     else { Err(()) } // raise error
 }
 
-#[derive(Clone, PartialEq, Debug, Serialize)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Transaction {
     pub src: String,
     pub dst: String,
@@ -174,7 +203,7 @@ impl TransactionPool {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Deserialize)]
 pub struct Block {
     pub index: u64,
     pub datetime: String,
@@ -331,13 +360,6 @@ impl BlockChain {
         let mut genisis_block = Block::new(0, Vec::new(), String::new()); // new block
         genisis_block.calc_hash(0); // calc hash of block
         let _ = chain.add_block(&genisis_block); // append block to chain
-
-        // debug
-        let mut genisis_block = Block::new(1, Vec::new(), String::new()); // new block
-        genisis_block.calc_hash(1); // calc hash of block
-        let _ = chain.add_block(&genisis_block); // append block to chain
-        // debug
-
         chain
     }
 
@@ -381,6 +403,48 @@ impl BlockChain {
     }
 }
 
+pub struct MineController {
+    cmd: &'static str,
+    start: u64,
+    steps: u64,
+    difficulty: u8,
+    block: Block,
+}
+
+impl MineController {
+    // constructor
+    pub fn new(start: u64, steps: u64, difficulty: u8, block: Block) -> MineController {
+        MineController { cmd: "cargo", start, steps, difficulty, block }
+    }
+
+    pub fn run(&self) -> Result<[String; 2], std::io::Error> {
+        // format data
+        let plain = format!(
+            "{{\"start\":{},\"steps\":{},\"difficulty\":{},\"block\":{}}}", 
+            self.start, self.steps, self.difficulty, self.block.as_json()
+        );
+
+        // run child proccess
+        match Command::new(self.cmd).args([
+            "run", "--bin", "miner", "--", &STANDARD.encode(plain),
+        ]).output() {
+            Ok(n) => {
+                let stdout = String::from_utf8(n.stdout).unwrap();
+                let stderr = String::from_utf8(n.stderr).unwrap();
+                return Ok([stdout, stderr])
+            },
+            Err(e) => Err(e),
+        }
+    }
+}
+
+pub fn get_difficulty(difficulty: u8) -> BigUint {
+    // get hash difficulty
+    let pat = "F".repeat(usize::from(difficulty));
+    let to = "0".repeat(usize::from(difficulty));
+    let hex_str = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF".replacen(&pat, &to, 1);
+    BigUint::parse_bytes(hex_str.as_bytes(), 16).unwrap()
+}
 
 pub fn check_addr(addr: &String) -> bool {
     // check peer address; for example "127.0.0.1:8080"
@@ -408,11 +472,13 @@ pub fn send_string(mut stream: &TcpStream, data: String) -> Result<String, Box<d
         Ok(_) => {},
         Err(e) => return Err(Box::new(e)),
     }
+
     // send EOF
     match stream.shutdown(Shutdown::Write) {
         Ok(_) => {},
         Err(e) => return Err(Box::new(e)),
     }
+    
     // read response
     let mut buffer = String::new();
     match stream.read_to_string(&mut buffer) {
@@ -428,17 +494,22 @@ pub fn broadcast(peers: &Vec<String>, dtype: i8, data: &String) -> Vec<String> {
         // connect to peer
         let stream = match TcpStream::connect(peer) {
             Ok(n) => n,
-            Err(e) => {
+            Err(_) => {
                 peers_failed.push(peer.clone());
-                eprintln!("[#] DTYPE:{} - connection failed: {:?}", dtype, e);
                 continue;
             }
         };
+
         // send transaction to peer
-        send_string(&stream, format!("{{\"dtype\": {}, \"data\": {}}}", dtype, data));
+        match send_string(&stream, format!("{{\"dtype\": {}, \"data\": {}}}", dtype, data)) {
+            Ok(_) => {},
+            Err(_) => {
+                peers_failed.push(peer.clone());
+                continue;
+            }
+        };
     }
-    // return peers where connection failed
-    peers_failed
+    peers_failed // return peers where connection failed
 }
 
 pub fn subtract_vec<T: PartialEq>(mut x: Vec<T>, y: Vec<T>) -> Vec<T>{
