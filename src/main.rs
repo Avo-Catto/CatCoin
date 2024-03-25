@@ -120,7 +120,6 @@ fn main() {
         // add blocks to chain
         let mut blockchain = blockchain.lock().unwrap();
         blockchain.set_chain(chain);
-        drop(blockchain);
         println!("[+] SYNC - blockchain update successful");
 
     // if no entry node specified
@@ -194,7 +193,6 @@ fn main() {
             // remove invalid transactions & update transaction pool
             let mut pool = transactionpool.lock().unwrap();
             *pool = TransactionPool::from_vec(&rcvd_pool);
-            drop(pool);
             println!("[+] SYNC - update transaction pool successful");
         
         } else {
@@ -259,29 +257,114 @@ fn main() {
         
         // remove unreachable peers & update peers
         *peers = subtract_vec(peers.to_vec(), rm);
-        drop(peers);
         println!("[+] SYNC - update list of peers successful");
     }
 
     // log stuff
     println!("[+] SETUP - listening on: {}", addr);
     println!("[+] SETUP - genisis hash: {}", blockchain.lock().unwrap().get_latest().unwrap().hash);
-
-    // TODO: run miner in thread? does it have to be a thread?
     println!("[+] MINER - target value: {:?}", get_difficulty(args.difficulty));
 
-    /* 
-    // set up miner
-    let miner = MineController::new(0, 1, args.difficulty, block);
+    { // mining thread
+        let blockchain = blockchain.clone();
+        let transactionpool = transactionpool.clone();
+        thread::spawn(move || {
+            loop {
+                // clone and lock required mutex objects
+                let chain = {
+                    let lock = blockchain.lock().unwrap();
+                    lock.clone()
+                };
+    
+                let mut pool = {
+                    let mut lock = transactionpool.lock().unwrap();
+                    let tmp = lock.clone();
+                    lock.flush();
+                    tmp
+                };
+    
+                let prev_block = match chain.get_latest() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        eprintln!("[#] MINER - get previous block error");
+                        exit(1);
+                    },
+                };
+    
+                // construct block
+                let mut block = Block::new(prev_block.index + 1, pool.pool.clone(), prev_block.hash);
+                pool.flush(); // flush pool
+    
+                // set up miner // TODO: the start value is random
+                let miner = MineController::new(0, 1, args.difficulty, block.clone());
+    
+                // start mining
+                println!("[+] MINER - mining...");
+                match miner.run() {
+                    Ok(n) => {
+                        // check stderr output
+                        if n[0].is_empty() {
+                            eprintln!("[#] MINER - error:\n\n{}", n[1]);
+                            return;
+                        }
+    
+                        // decode base64
+                        let decoded = match STANDARD.decode(n[0].clone()) {
+                            Ok(n) => n,
+                            Err(e) => {
+                                eprintln!("[#] MINER - decode base64 error: {}", e);
+                                return;
+                            }
+                        };
+    
+                        // convert u8 vector to string
+                        let json_string = match String::from_utf8(decoded) {
+                            Ok(n) => n,
+                            Err(e) => {
+                                eprintln!("[#] MINER - convert utf8 error: {}", e);
+                                return;
+                            }
+                        };
+    
+                        // parse string to json
+                        let json: MineReceiver = match serde_json::from_str(&json_string) {
+                            Ok(n) => n,
+                            Err(e) => {
+                                eprintln!("[#] MINER - parse json error: {}", e);
+                                return;
+                            }
+                        };
+    
+                        // update block // TODO: merkle hash?
+                        block.nonce = json.nonce;
+                        block.hash = json.hash;
+                    },
+                    Err(e) => {
+                        eprintln!("[#] MINER - error: {}", e);
+                        return;
+                    },
+                }
+    
+                // validate block
+                match block.validate() { // TODO: merkle hash?
+                    Ok(_) => println!("[+] MINER - nonce found: {}", block.nonce),
+                    Err(e) => {
+                        eprintln!("[#] MINER - block invalid: {:?}", e);
+                        return;
+                    }
+                }
 
-    // start mining
-    match miner.run() {
-        Ok(n) => println!("miner: {}", n),
-        Err(e) => println!("miner err: {}", e),
+                // TODO: share block
+
+                // append block to chain
+                let mut chain = blockchain.lock().unwrap();
+                match chain.add_block(&block) {
+                    Ok(_) => println!("[+] MINER - block added:\n\n{}", block.str()),
+                    Err(e) => eprintln!("[#] DEBUG - adding block error: {:?}", e),
+                }
+            }
+        });
     }
-    */
-
-
 
     // create listener
     let listener: TcpListener = TcpListener::bind(addr).unwrap();
@@ -339,17 +422,15 @@ fn main() {
                 // add peer to list if not already contained
                 let mut peers = peers.lock().unwrap();
                 if !peers.contains(&peer) {
-                    // if not in list
                     peers.push(peer);
                     respond_code(&stream, 0);
-                    drop(peers);
                 
                 // if already in list
                 } else { respond_code(&stream, 0); }
             
             // get peers
             }  else if data.dtype == 1 {
-                // respend list of peers
+                // respond list of peers
                 respond_json(&stream, json!(*peers.lock().unwrap()));
 
             // add Transaction
@@ -388,7 +469,6 @@ fn main() {
 
                     // remove unreachable peers
                     *peers = subtract_vec(peers.to_vec(), failed);
-                    drop(peers);
                 }
 
                 // add transaction to pool
@@ -397,7 +477,6 @@ fn main() {
                     Ok(_) => {
                         println!("[+] DTYPE:2 - transaction added\n\n{}", transaction.str());
                         respond_code(&stream, 0);
-                        drop(pool);
                     },
                     Err(e) => {
                         respond_code(&stream, 1);
@@ -412,7 +491,9 @@ fn main() {
                 respond_json(&stream, json!(*transactionpool.lock().unwrap().pool));
 
             // validate block
-            } else if data.dtype == 4 { // TODO: add kill mining block and append received block to chain if valid and start mining next block
+            } else if data.dtype == 4 {
+                // TODO: add kill currently mined block and append received block to chain if valid and start mining next block
+                // TODO: advanced datetime check?
                 // construct block
                 let block = match Block::from_json(&data.data) {
                     Ok(n) => n,
@@ -483,98 +564,7 @@ fn main() {
                 let blocks: Vec<serde_json::Value> = chain.get_chain().iter().map(|x| x.as_json()).collect(); // convert blocks to json
                 respond_json(&stream, json!(blocks)); // respond blockchain
                 return;
-            
-            // DEBUG
-            } else if data.dtype == 6 {
-                // TODO: make it not stop the entire node
-
-                // clone and lock required mutex objects
-                let chain = { blockchain.clone() };
-                let mut chain = chain.lock().unwrap();
-                
-                let pool = { transactionpool.clone() };
-                let mut pool = pool.lock().unwrap();
-
-                let prev_block = match chain.get_latest() {
-                    Ok(n) => n,
-                    Err(_) => {
-                        eprintln!("[#] MINER - get previous block error");
-                        exit(1);
-                    },
-                };
-
-                // construct block
-                let mut block = Block::new(prev_block.index + 1, pool.pool.clone(), prev_block.hash);
-                pool.flush(); // flush pool
-
-                // set up miner // TODO: the start value is random
-                let miner = MineController::new(0, 1, args.difficulty, block.clone());
-
-                // start mining
-                println!("[+] MINER - mining...");
-                match miner.run() {
-                    Ok(n) => {
-                        // check stderr output
-                        if n[0].is_empty() {
-                            eprintln!("[#] MINER - error:\n\n{}", n[1]);
-                            return;
-                        }
-
-                        // decode base64
-                        let decoded = match STANDARD.decode(n[0].clone()) {
-                            Ok(n) => n,
-                            Err(e) => {
-                                eprintln!("[#] MINER - decode base64 error: {}", e);
-                                return;
-                            }
-                        };
-
-                        // convert u8 vector to string
-                        let json_string = match String::from_utf8(decoded) {
-                            Ok(n) => n,
-                            Err(e) => {
-                                eprintln!("[#] MINER - convert utf8 error: {}", e);
-                                return;
-                            }
-                        };
-
-                        // parse string to json
-                        let json: MineReceiver = match serde_json::from_str(&json_string) {
-                            Ok(n) => n,
-                            Err(e) => {
-                                eprintln!("[#] MINER - parse json error: {}", e);
-                                return;
-                            }
-                        };
-
-                        // update block
-                        block.nonce = json.nonce;
-                        block.hash = json.hash;
-                    },
-                    Err(e) => {
-                        eprintln!("[#] MINER - error: {}", e);
-                        return;
-                    },
-                }
-
-                // validate block
-                match block.validate() {
-                    Ok(_) => println!("[+] MINER - nonce found: {}", block.nonce),
-                    Err(e) => {
-                        eprintln!("[#] MINER - block invalid: {:?}", e);
-                        return;
-                    }
-                }
-
-                // TODO: flush pool & append block to chain
-
-                // append block to chain
-                match chain.add_block(&block) {
-                    Ok(_) => println!("[+] MINER - block added:\n\n{}", block.str()),
-                    Err(e) => eprintln!("[#] DEBUG - adding block error: {:?}", e),
-                }
-                respond_json(&stream, json!({})); // debug
-            }
+            } 
         });
     };
 }

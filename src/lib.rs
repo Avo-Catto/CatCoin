@@ -137,15 +137,15 @@ impl Transaction {
         hash_str(hash_fmt.as_bytes())
     }
 
-    pub fn validate(&self) -> Result<(), TVE> { // TODO: refactor regex checks using "is_match"
+    pub fn validate(&self) -> Result<(), TVE> {
         // check if values of transaction are valid
         let uuid_re = Regex::new("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$").unwrap();
         let datetime_re = Regex::new(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\d{3}\+\d{2}:\d{2})$").unwrap();
         
         // regex check
-        if uuid_re.captures(&self.src).is_none() { return Err(TVE::MismatchSource) } // check src
-        if uuid_re.captures(&self.dst).is_none() { return Err(TVE::MismatchDestination) } // check dst
-        if datetime_re.captures(&self.date).is_none() { return Err(TVE::MismatchDate) } // check date
+        if !uuid_re.is_match(&self.src) { return Err(TVE::MismatchSource) } // checksrc
+        if !uuid_re.is_match(&self.dst) { return Err(TVE::MismatchDestination) } // check dst
+        if !datetime_re.is_match(&self.date) { return Err(TVE::MismatchDate) } // check date
         if self.recalc_hash() != self.hash { return Err(TVE::MismatchHash) } // check hash
         Ok(())
     }
@@ -159,7 +159,7 @@ impl Transaction {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct TransactionPool {
     pub pool: Vec<Transaction>,
 }
@@ -247,15 +247,14 @@ impl Block {
         hash
     }
 
-    // TODO: refactor regex checks using "is_match"
     pub fn validate(&self) -> Result<(), BlockError> { // TODO: add / check hash difficulty
         // check if values of block are valid
         let sha256_re = Regex::new("^[a-fA-F0-9]{64}$").unwrap();
         let datetime_re = Regex::new(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\d{3}\+\d{2}:\d{2})$").unwrap();
         
         // regex checks
-        if sha256_re.captures(&self.previous_hash).is_none() { return Err(BlockError::MismatchPreviousHash) } // check previous hash
-        if datetime_re.captures(&self.datetime).is_none() { return Err(BlockError::MismatchDate) } // check date
+        if !sha256_re.is_match(&self.previous_hash) { return Err(BlockError::MismatchPreviousHash) } // check previous hash
+        if !datetime_re.is_match(&self.datetime) { return Err(BlockError::MismatchDate) } // check date
         if self.clone().calc_hash(self.nonce) != self.hash { return Err(BlockError::MismatchHash) } // check hash
 
         // check transactions
@@ -342,6 +341,7 @@ impl Block {
     }
 }
 
+#[derive(Clone)]
 pub struct BlockChain {
     chain: Vec<Block>,
 }
@@ -509,7 +509,7 @@ pub fn broadcast(peers: &Vec<String>, dtype: i8, data: &String) -> Vec<String> {
             }
         };
     }
-    peers_failed // return peers where connection failed
+    peers_failed
 }
 
 pub fn subtract_vec<T: PartialEq>(mut x: Vec<T>, y: Vec<T>) -> Vec<T>{
