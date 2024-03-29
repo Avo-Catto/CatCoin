@@ -1,12 +1,24 @@
-use std::{env, error::Error, fmt::format, io::{Read, Write}, net::{Shutdown, TcpStream}, panic::catch_unwind, process::{Child, Command}, str::FromStr, vec};
 use base64::{engine::general_purpose::STANDARD, Engine};
+use chrono::Utc;
 use num_bigint::BigUint;
+use rand::{thread_rng, Rng};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use chrono::Utc;
-use regex::Regex;
 use std::any::Any;
+use std::thread::sleep;
+use std::{
+    error::Error,
+    io::{Read, Write},
+    net::{Shutdown, TcpStream},
+    panic::catch_unwind,
+    process::{exit, Child, Command, Stdio},
+    str::FromStr,
+    sync::{Arc, Mutex},
+    thread,
+    time::Duration,
+};
 
 #[derive(Debug)]
 pub enum PoolError {
@@ -16,7 +28,7 @@ pub enum PoolError {
 #[derive(Debug)]
 pub enum BlockChainError {
     BlockAlreadyInChain,
-    InvalidIndex
+    InvalidIndex,
 }
 
 #[derive(Debug)]
@@ -35,6 +47,13 @@ pub enum BlockError {
     MismatchPreviousHash,
     MismatchHash,
     MismatchMerkleHash,
+}
+
+#[derive(Deserialize)]
+struct MineReceiver {
+    nonce: u64,
+    hash: String,
+    merkle: String,
 }
 
 pub fn datetime_now() -> String {
@@ -61,19 +80,28 @@ pub fn merkle_hash(data: Vec<String>) -> Result<String, ()> {
     let mut hash: String;
 
     for i in (0..len).step_by(2) {
-        hash_input = format!("{}${}", data[i], data[i+1]); // merge two elements
+        hash_input = format!("{}${}", data[i], data[i + 1]); // merge two elements
         hash = hash_str(hash_input.as_bytes()); // hash it
         output.push(hash);
     }
 
-    if !even { // append hash of last element if not even
+    if !even {
+        // append hash of last element if not even
         hash = hash_str(data[len].as_bytes());
         output.push(hash);
     }
 
-    if len > 1 { merkle_hash(output) } // if elements left
-    else if output.len() == 1 { Ok(output[0].clone()) } // return output
-    else { Err(()) } // raise error
+    if len > 1 {
+        merkle_hash(output)
+    }
+    // if elements left
+    else if output.len() == 1 {
+        Ok(output[0].clone())
+    }
+    // return output
+    else {
+        Err(())
+    } // raise error
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -88,10 +116,10 @@ pub struct Transaction {
 
 impl Transaction {
     // contstructor
-    pub fn new(src: &str, dst: &str, val: f64, broadcast: bool) -> Transaction{
+    pub fn new(src: &str, dst: &str, val: f64, broadcast: bool) -> Transaction {
         let date = datetime_now();
-        let hash_fmt = format!("{}${}${}${}", src, dst, date, val); 
-        
+        let hash_fmt = format!("{}${}${}${}", src, dst, date, val);
+
         // construct transaction
         Transaction {
             src: String::from_str(src).unwrap(),
@@ -99,7 +127,7 @@ impl Transaction {
             date,
             val,
             broadcast,
-            hash: hash_str(hash_fmt.as_bytes())
+            hash: hash_str(hash_fmt.as_bytes()),
         }
     }
 
@@ -107,10 +135,22 @@ impl Transaction {
         // construct transaction from json
         let transaction = catch_unwind(|| {
             let mut transaction = Self::new(
-                json.get("src").unwrap().as_str().expect("Transaction::from_json: src"),
-                json.get("dst").unwrap().as_str().expect("Transaction::from_json: dst"),
-                json.get("val").unwrap().as_f64().expect("Transaction::from_json: val"),
-                json.get("broadcast").unwrap().as_bool().expect("Transaction::from_json: broadcast")
+                json.get("src")
+                    .unwrap()
+                    .as_str()
+                    .expect("Transaction::from_json: src"),
+                json.get("dst")
+                    .unwrap()
+                    .as_str()
+                    .expect("Transaction::from_json: dst"),
+                json.get("val")
+                    .unwrap()
+                    .as_f64()
+                    .expect("Transaction::from_json: val"),
+                json.get("broadcast")
+                    .unwrap()
+                    .as_bool()
+                    .expect("Transaction::from_json: broadcast"),
             );
             transaction.date = json.get("date").unwrap().to_string().replace("\"", "");
             transaction.hash = json.get("hash").unwrap().to_string().replace("\"", "");
@@ -140,20 +180,30 @@ impl Transaction {
     pub fn validate(&self) -> Result<(), TVE> {
         // check if values of transaction are valid
         let uuid_re = Regex::new("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$").unwrap();
-        let datetime_re = Regex::new(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\d{3}\+\d{2}:\d{2})$").unwrap();
-        
+        let datetime_re =
+            Regex::new(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\d{3}\+\d{2}:\d{2})$")
+                .unwrap();
+
         // regex check
-        if !uuid_re.is_match(&self.src) { return Err(TVE::MismatchSource) } // checksrc
-        if !uuid_re.is_match(&self.dst) { return Err(TVE::MismatchDestination) } // check dst
-        if !datetime_re.is_match(&self.date) { return Err(TVE::MismatchDate) } // check date
-        if self.recalc_hash() != self.hash { return Err(TVE::MismatchHash) } // check hash
+        if !uuid_re.is_match(&self.src) {
+            return Err(TVE::MismatchSource);
+        } // checksrc
+        if !uuid_re.is_match(&self.dst) {
+            return Err(TVE::MismatchDestination);
+        } // check dst
+        if !datetime_re.is_match(&self.date) {
+            return Err(TVE::MismatchDate);
+        } // check date
+        if self.recalc_hash() != self.hash {
+            return Err(TVE::MismatchHash);
+        } // check hash
         Ok(())
     }
 
     pub fn str(&self) -> String {
         // return transaction as String
         format!(
-            "- Source: {}\n- Destination: {}\n- Date: {}\n- Value: {}\n- Hash: {}\n", 
+            "- Source: {}\n- Destination: {}\n- Date: {}\n- Value: {}\n- Hash: {}\n",
             self.src, self.dst, self.date, self.val, self.hash
         )
     }
@@ -211,7 +261,7 @@ pub struct Block {
     pub previous_hash: String,
     pub nonce: u64,
     pub hash: String,
-    merkle: String,
+    pub merkle: String,
     hash_str: String,
 }
 
@@ -221,11 +271,9 @@ impl Block {
         // get datetime and calculate merkle hash
         let datetime = datetime_now();
         let merkle: String = match transactions.is_empty() {
-            true => { String::new() }
-            false => {
-                merkle_hash(transactions.iter().map(|x| x.hash.clone()).collect())
-                .expect("Block::new().merkle_hash failed")
-            }
+            true => String::new(),
+            false => merkle_hash(transactions.iter().map(|x| x.hash.clone()).collect())
+                .expect("Block::new().merkle_hash failed"),
         };
         Block {
             index,
@@ -239,7 +287,7 @@ impl Block {
         }
     }
 
-    pub fn calc_hash(&mut self, nonce:u64) -> String {
+    pub fn calc_hash(&mut self, nonce: u64) -> String {
         // update nonce and calculate hash
         self.nonce = nonce;
         let hash = hash_str(format!("{}${}", self.hash_str, nonce).as_bytes());
@@ -247,15 +295,24 @@ impl Block {
         hash
     }
 
-    pub fn validate(&self) -> Result<(), BlockError> { // TODO: add / check hash difficulty
+    pub fn validate(&self) -> Result<(), BlockError> {
+        // TODO: add / check hash difficulty
         // check if values of block are valid
         let sha256_re = Regex::new("^[a-fA-F0-9]{64}$").unwrap();
-        let datetime_re = Regex::new(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\d{3}\+\d{2}:\d{2})$").unwrap();
-        
+        let datetime_re =
+            Regex::new(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\d{3}\+\d{2}:\d{2})$")
+                .unwrap();
+
         // regex checks
-        if !sha256_re.is_match(&self.previous_hash) { return Err(BlockError::MismatchPreviousHash) } // check previous hash
-        if !datetime_re.is_match(&self.datetime) { return Err(BlockError::MismatchDate) } // check date
-        if self.clone().calc_hash(self.nonce) != self.hash { return Err(BlockError::MismatchHash) } // check hash
+        if !sha256_re.is_match(&self.previous_hash) {
+            return Err(BlockError::MismatchPreviousHash);
+        } // check previous hash
+        if !datetime_re.is_match(&self.datetime) {
+            return Err(BlockError::MismatchDate);
+        } // check date
+        if self.clone().calc_hash(self.nonce) != self.hash {
+            return Err(BlockError::MismatchHash);
+        } // check hash
 
         // check transactions
         for t in &self.transactions {
@@ -264,23 +321,23 @@ impl Block {
                 Err(e) => {
                     println!("transaction invalid: {:?}", e);
                     return Err(BlockError::TransactionValidationFailed);
-                },
+                }
             }
         }
 
         // recreate merkle hash to validate
         let merkle = match self.transactions.is_empty() {
-            true => { String::new() }
-            false => {
-                merkle_hash(self.transactions.iter().map(|x| x.hash.clone()).collect())
-                .expect("Block::validate().merkle_hash failed")
-            }
+            true => String::new(),
+            false => merkle_hash(self.transactions.iter().map(|x| x.hash.clone()).collect())
+                .expect("Block::validate().merkle_hash failed"),
         };
-        if merkle != self.merkle { return Err(BlockError::MismatchMerkleHash) } // check merkle hash
+        if merkle != self.merkle {
+            return Err(BlockError::MismatchMerkleHash);
+        } // check merkle hash
         Ok(())
     }
 
-    pub fn as_json(&self) -> serde_json::Value{
+    pub fn as_json(&self) -> serde_json::Value {
         // return block as json
         json!({
             "index": self.index,
@@ -312,14 +369,24 @@ impl Block {
 
         // construct block
         let mut block = Self::new(
-            json.get("index").unwrap().as_u64().expect("Block::from_json: index"),
-            transactions, 
-            json.get("previous_hash").unwrap().to_string().replace("\"", ""),
+            json.get("index")
+                .unwrap()
+                .as_u64()
+                .expect("Block::from_json: index"),
+            transactions,
+            json.get("previous_hash")
+                .unwrap()
+                .to_string()
+                .replace("\"", ""),
         );
 
         // update values
         block.datetime = json.get("datetime").unwrap().to_string().replace("\"", "");
-        block.nonce = json.get("nonce").unwrap().as_u64().expect("Block::from_json: nonce");
+        block.nonce = json
+            .get("nonce")
+            .unwrap()
+            .as_u64()
+            .expect("Block::from_json: nonce");
         block.hash = json.get("hash").unwrap().to_string().replace("\"", "");
         block.merkle = json.get("merkle").unwrap().to_string().replace("\"", "");
         block.hash_str = format!("{}${}${}", block.index, block.datetime, block.merkle);
@@ -349,9 +416,7 @@ pub struct BlockChain {
 impl BlockChain {
     // constructor
     pub fn new() -> BlockChain {
-        BlockChain {
-            chain: Vec::new(),
-        }
+        BlockChain { chain: Vec::new() }
     }
 
     // construct blockchain with genisis block
@@ -374,21 +439,32 @@ impl BlockChain {
     pub fn get_latest(&self) -> Result<Block, ()> {
         // check if none
         let latest = self.chain.last();
-        if latest.is_none() { Err(()) }
-        else { Ok(latest.unwrap().clone()) }
+        if latest.is_none() {
+            Err(())
+        } else {
+            Ok(latest.unwrap().clone())
+        }
     }
 
     pub fn add_block(&mut self, block: &Block) -> Result<(), BlockChainError> {
         // add block to chain
         // check if block already in chain
         if self.chain.contains(block) {
-            return Err(BlockChainError::BlockAlreadyInChain)
+            return Err(BlockChainError::BlockAlreadyInChain);
         }
 
         // check index
         match self.chain.last() {
-            Some(n) => if n.index + 1 != block.index { return Err(BlockChainError::InvalidIndex) },
-            None => if block.index != 0 { return Err(BlockChainError::InvalidIndex) },
+            Some(n) => {
+                if n.index + 1 != block.index {
+                    return Err(BlockChainError::InvalidIndex);
+                }
+            }
+            None => {
+                if block.index != 0 {
+                    return Err(BlockChainError::InvalidIndex);
+                }
+            }
         }
         self.chain.push(block.clone()); // add block to chain
         Ok(())
@@ -403,38 +479,191 @@ impl BlockChain {
     }
 }
 
+#[derive(Clone)]
 pub struct MineController {
-    cmd: &'static str,
-    start: u64,
-    steps: u64,
-    difficulty: u8,
-    block: Block,
+    blockchain: Arc<Mutex<BlockChain>>,
+    transactionpool: Arc<Mutex<TransactionPool>>,
+    peers: Arc<Mutex<Vec<String>>>,
+    difficulty: Arc<Mutex<u8>>,
+    sleep: Arc<Duration>,
+    pub stop: Arc<Mutex<bool>>,
 }
 
 impl MineController {
     // constructor
-    pub fn new(start: u64, steps: u64, difficulty: u8, block: Block) -> MineController {
-        MineController { cmd: "cargo", start, steps, difficulty, block }
+    pub fn new(
+        blockchain: &Arc<Mutex<BlockChain>>,
+        transactionpool: &Arc<Mutex<TransactionPool>>,
+        peers: &Arc<Mutex<Vec<String>>>,
+        difficulty: &Arc<Mutex<u8>>,
+    ) -> MineController {
+        MineController {
+            blockchain: blockchain.clone(),
+            transactionpool: transactionpool.clone(),
+            peers: peers.clone(),
+            difficulty: difficulty.clone(),
+            sleep: Arc::new(Duration::new(0, 5)),
+            stop: Arc::new(Mutex::new(false)),
+            // TODO: don't communicate over shared memory! use channels
+        }
     }
 
-    pub fn run(&self) -> Result<[String; 2], std::io::Error> {
+    pub fn run(&self) {
+        let self_arc: Arc<MineController> = Arc::new(self.clone());
+        thread::spawn(move || {
+            loop {
+                // clone and lock required mutex objects
+                let chain = {
+                    let lock = self_arc.blockchain.lock().unwrap();
+                    lock.clone()
+                };
+
+                let mut pool = {
+                    let mut lock = self_arc.transactionpool.lock().unwrap();
+                    let tmp = lock.clone();
+                    lock.flush();
+                    tmp
+                };
+
+                let prev_block = match chain.get_latest() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        eprintln!("[#] MINER - get previous block error");
+                        exit(1);
+                    }
+                };
+
+                // construct block
+                let mut block =
+                    Block::new(prev_block.index + 1, pool.pool.clone(), prev_block.hash);
+                pool.flush(); // flush pool
+
+                // set up miner
+                let miner = {
+                    let mut rng = thread_rng();
+                    MineController::command(
+                        rng.gen(),
+                        1,
+                        *self_arc.difficulty.lock().unwrap(),
+                        block.clone(),
+                    )
+                };
+
+                // start mining
+                println!("[+] MINER - mining...");
+                match miner {
+                    Ok(mut child) => {
+                        // IO of child process
+                        let mut stdout = child.stdout.take().unwrap();
+                        let mut stdin = child.stdin.take().unwrap();
+                        let mut buf = String::new();
+
+                        // while mining not finished
+                        while stdout.read_to_string(&mut buf).unwrap_or(1).eq(&0) {
+                            {
+                                // write stop to stdin if stop
+                                if *self_arc.stop.lock().unwrap() {
+                                    match stdin
+                                        .write(self_arc.stop.lock().unwrap().to_string().as_bytes())
+                                    {
+                                        Ok(_) => (),
+                                        Err(e) => {
+                                            eprintln!(
+                                                "[#] MINER - child process stdin error: {}",
+                                                e
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                    continue;
+                                }
+                                sleep(*self_arc.sleep);
+                            }
+                        }
+
+                        // decode base64
+                        let decoded = match STANDARD.decode(&buf) {
+                            Ok(n) => n,
+                            Err(e) => {
+                                eprintln!("[#] MINER - decode base64 error: {}", e);
+                                return;
+                            }
+                        };
+
+                        // convert u8 vector to string
+                        let json_string = match String::from_utf8(decoded) {
+                            Ok(n) => n,
+                            Err(e) => {
+                                eprintln!("[#] MINER - convert utf8 error: {}", e);
+                                return;
+                            }
+                        };
+
+                        // parse string to json
+                        let json: MineReceiver = match serde_json::from_str(&json_string) {
+                            Ok(n) => n,
+                            Err(e) => {
+                                eprintln!("[#] MINER - parse json error: {}", e);
+                                return;
+                            }
+                        };
+
+                        // update block
+                        block.nonce = json.nonce;
+                        block.hash = json.hash;
+                        block.merkle = json.merkle;
+                    }
+                    Err(e) => {
+                        eprintln!("[#] MINER - error: {}", e);
+                        return;
+                    }
+                }
+
+                // validate block
+                match block.validate() {
+                    Ok(_) => println!("[+] MINER - nonce found: {}", block.nonce),
+                    Err(e) => {
+                        eprintln!("[#] MINER - block invalid: {:?}", e);
+                        return;
+                    }
+                }
+                {
+                    // broadcast block & update peers
+                    let mut peers = self_arc.peers.lock().unwrap();
+                    let failed = broadcast(&peers, 4, &block.as_json().to_string());
+                    *peers = subtract_vec(peers.to_vec(), failed);
+                }
+                {
+                    // append block to chain
+                    let mut chain = self_arc.blockchain.lock().unwrap();
+                    match chain.add_block(&block) {
+                        Ok(_) => println!("[+] MINER - block added:\n\n{}", block.str()),
+                        Err(e) => eprintln!("[#] DEBUG - adding block error: {:?}", e),
+                    }
+                }
+            }
+        });
+    }
+
+    fn command(
+        start: u64,
+        steps: u64,
+        difficulty: u8,
+        block: Block,
+    ) -> Result<Child, std::io::Error> {
         // format data
         let plain = format!(
-            "{{\"start\":{},\"steps\":{},\"difficulty\":{},\"block\":{}}}", 
-            self.start, self.steps, self.difficulty, self.block.as_json()
+            "{{\"start\":{},\"steps\":{},\"difficulty\":{},\"block\":{}}}",
+            start,
+            steps,
+            difficulty,
+            block.as_json()
         );
-
-        // run child proccess
-        match Command::new(self.cmd).args([
-            "run", "--bin", "miner", "--", &STANDARD.encode(plain),
-        ]).output() {
-            Ok(n) => {
-                let stdout = String::from_utf8(n.stdout).unwrap();
-                let stderr = String::from_utf8(n.stderr).unwrap();
-                return Ok([stdout, stderr])
-            },
-            Err(e) => Err(e),
-        }
+        Command::new("cargo")
+            .args(["run", "--bin", "miner", "-q", "--", &STANDARD.encode(plain)])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
     }
 }
 
@@ -442,7 +671,8 @@ pub fn get_difficulty(difficulty: u8) -> BigUint {
     // get hash difficulty
     let pat = "F".repeat(usize::from(difficulty));
     let to = "0".repeat(usize::from(difficulty));
-    let hex_str = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF".replacen(&pat, &to, 1);
+    let hex_str = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+        .replacen(&pat, &to, 1);
     BigUint::parse_bytes(hex_str.as_bytes(), 16).unwrap()
 }
 
@@ -456,29 +686,33 @@ pub fn check_addr(addr: &String) -> bool {
 
 pub fn respond_code(mut stream: &TcpStream, code: i8) {
     // respond code
-    stream.write(format!("{{\"res\": {code}}}").as_bytes()).unwrap();
+    stream
+        .write(format!("{{\"res\": {code}}}").as_bytes())
+        .unwrap();
     stream.shutdown(Shutdown::Write).unwrap();
 }
 
 pub fn respond_json(mut stream: &TcpStream, json: serde_json::Value) {
     // respond json
-    stream.write(format!("{{\"res\": 0, \"data\": {data}}}", data=json.to_string()).as_bytes()).unwrap();
+    stream
+        .write(format!("{{\"res\": 0, \"data\": {data}}}", data = json.to_string()).as_bytes())
+        .unwrap();
     stream.shutdown(Shutdown::Write).unwrap();
 }
 
 pub fn send_string(mut stream: &TcpStream, data: String) -> Result<String, Box<dyn Error>> {
     // write data to stream
     match stream.write(data.as_bytes()) {
-        Ok(_) => {},
+        Ok(_) => {}
         Err(e) => return Err(Box::new(e)),
     }
 
     // send EOF
     match stream.shutdown(Shutdown::Write) {
-        Ok(_) => {},
+        Ok(_) => {}
         Err(e) => return Err(Box::new(e)),
     }
-    
+
     // read response
     let mut buffer = String::new();
     match stream.read_to_string(&mut buffer) {
@@ -501,8 +735,11 @@ pub fn broadcast(peers: &Vec<String>, dtype: i8, data: &String) -> Vec<String> {
         };
 
         // send transaction to peer
-        match send_string(&stream, format!("{{\"dtype\": {}, \"data\": {}}}", dtype, data)) {
-            Ok(_) => {},
+        match send_string(
+            &stream,
+            format!("{{\"dtype\": {}, \"data\": {}}}", dtype, data),
+        ) {
+            Ok(_) => {}
             Err(_) => {
                 peers_failed.push(peer.clone());
                 continue;
@@ -512,7 +749,7 @@ pub fn broadcast(peers: &Vec<String>, dtype: i8, data: &String) -> Vec<String> {
     peers_failed
 }
 
-pub fn subtract_vec<T: PartialEq>(mut x: Vec<T>, y: Vec<T>) -> Vec<T>{
+pub fn subtract_vec<T: PartialEq>(mut x: Vec<T>, y: Vec<T>) -> Vec<T> {
     for i in y {
         match x.iter().position(|y| y == &i) {
             Some(n) => x.remove(n),
