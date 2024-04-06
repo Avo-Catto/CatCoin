@@ -1,25 +1,37 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
+use cat_coin::{get_difficulty, Block};
 use num_bigint::BigUint;
 use serde::Deserialize;
 use serde_json::json;
-use std::{env, io::Stdin, process::exit};
-use CatCoin::{get_difficulty, Block};
+use std::{env, io::stdin, process::exit, thread};
 
 #[derive(Debug, Deserialize)]
 struct Receiver {
     start: u64,
-    steps: u64,
     difficulty: u8,
     block: serde_json::Value,
 }
 
-fn hash_block(target_val: BigUint, block: &mut Block, mut start: u64, steps: u64) {
-    let mut val = get_difficulty(0); // enter loop
+fn hash_block(target_val: BigUint, block: &mut Block, mut start: u64) {
+    let check_skip = thread::spawn(|| match stdin().read_line(&mut String::new()) {
+        Ok(_) => (), // eprintln!("DEBUG[MINERBIN] - skip block"), // DEBUG
+        Err(e) => eprintln!(
+            "[#] MINERBIN - skip current block read stdin error: {:?}",
+            e
+        ),
+    });
+
+    // enter loop
+    let mut val = get_difficulty(0);
     while val > target_val {
-        // if Stdin::r
+        // check if skipped
+        if check_skip.is_finished() {
+            exit(0);
+        }
+
         // calculate hash and get value
         val = BigUint::parse_bytes(block.calc_hash(start).as_bytes(), 16).unwrap();
-        start += steps;
+        start += 1;
         // TODO: if nonce exeeds data type, continue at 0
         // TODO: and find a way to transfer this huge number using max u64 data type
         // maybe modulo or something...
@@ -43,12 +55,7 @@ fn main() {
     };
 
     // hash block
-    hash_block(
-        get_difficulty(json.difficulty),
-        &mut block,
-        json.start,
-        json.steps,
-    );
+    hash_block(get_difficulty(json.difficulty), &mut block, json.start);
 
     // serialize output
     let json = json!({"nonce": &block.nonce, "merkle": &block.merkle, "hash": &block.hash}); // format json string

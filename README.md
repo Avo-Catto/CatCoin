@@ -1,6 +1,4 @@
-- **Run the Project**
-
-      cargo run --bin Cryptocurrency_Simulator -- --genisis
+- deviation of timestamp: 5 minutes
 
 - **Node Communication DTypes**
 

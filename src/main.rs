@@ -8,7 +8,6 @@ use clap::Parser;
 use num_bigint::BigUint;
 use serde::Deserialize;
 use serde_json::json;
-#[allow(non_snake_case)]
 use std::{
     io::Read,
     net::{Shutdown, TcpListener, TcpStream},
@@ -277,9 +276,14 @@ fn main() {
         get_difficulty(*difficulty.lock().unwrap())
     });
 
-    // TODO: run miner
-    // let mine_controller = MineController::new(&blockchain, &transactionpool, &peers, &difficulty);
-    // mine_controller.run();
+    // construct MineController and start mining
+    let mine_controller = Arc::new(MineController::new(
+        &blockchain,
+        &transactionpool,
+        &peers,
+        &difficulty,
+    ));
+    mine_controller.run();
 
     // create listener
     let listener: TcpListener = TcpListener::bind(addr).unwrap();
@@ -289,6 +293,7 @@ fn main() {
         let peers = Arc::clone(&peers);
         let transactionpool = Arc::clone(&transactionpool);
         let blockchain = Arc::clone(&blockchain);
+        let mine_controller = Arc::clone(&mine_controller);
 
         // spawn thread and handle connection
         let _ = thread::spawn(move || {
@@ -406,9 +411,6 @@ fn main() {
 
             // validate block
             } else if data.dtype == 4 {
-                // TODO: add kill currently mined block and append received block to chain if valid and start mining next block
-                // TODO: maybe using channels?
-                // TODO: advanced datetime check?
                 // construct block
                 let block = match Block::from_json(&data.data) {
                     Ok(n) => n,
@@ -419,31 +421,16 @@ fn main() {
                     }
                 };
 
-                // check integrity in blockchain
-                let chain = blockchain.lock().unwrap();
-                match chain.get_latest() {
-                    Ok(n) => {
-                        // check index
-                        if n.index + 1 != block.index {
-                            respond_code(&stream, 3);
-                            eprintln!("[+] DTYPE:4 - invalid index");
-                            return;
-                        }
-                        // check previous hash
-                        if n.hash != block.previous_hash {
-                            respond_code(&stream, 3);
-                            eprintln!("[+] DTYPE:4 - invalid previous hash");
-                            return;
-                        }
-                    }
-                    Err(_) => {
-                        respond_code(&stream, 3);
-                        return;
-                    }
+                {
+                    // debug
+                    println!("\n\nReceived:\n{}\n", block.str());
+                    println!(
+                        "\n\nCurrent:\n{}\n",
+                        mine_controller.current_block.lock().unwrap().str()
+                    );
                 }
 
-                // check hash difficulty
-                println!("debug: {}", block.hash); // debug
+                // parse hash difficulty
                 let val = match BigUint::parse_bytes(block.hash.as_bytes(), 16) {
                     Some(n) => n,
                     None => {
@@ -453,6 +440,7 @@ fn main() {
                     }
                 };
                 {
+                    // check hash difficulty
                     if val > get_difficulty(*difficulty.lock().unwrap()) {
                         respond_code(&stream, 3);
                         eprintln!("[#] DTYPE:4 - invalid hash difficulty");
@@ -469,17 +457,25 @@ fn main() {
                         return;
                     }
                 }
-
-                // TODO: check if block matches with currently minded block
+                {
+                    // check if block matches currently mined block
+                    if block != *mine_controller.current_block.lock().unwrap() {
+                        respond_code(&stream, 3);
+                        eprintln!("[#] DTYPE:4 - block doesn't match currently mined block");
+                        return;
+                    }
+                }
 
                 // add block to chain
                 match blockchain.lock().unwrap().add_block(&block) {
                     Ok(_) => {
-                        println!("[+] DTYPE:4 - block accepted");
+                        mine_controller.skip(); // skip currently mined block
+                        println!("[+] DTYPE:4 - add block to chain succeed");
                         respond_code(&stream, 2);
                     }
                     Err(e) => {
-                        eprintln!("[#] DTYPE:4 - add block to chain error: {:?}", e)
+                        eprintln!("[#] DTYPE:4 - add block to chain error: {:?}", e);
+                        respond_code(&stream, 3);
                     }
                 }
 
@@ -496,16 +492,25 @@ fn main() {
     }
 }
 
+// NOW:
+//  - other todos in the code
+
+// TODO: check if chain is still valid sometimes (every 10 blocks when the time was measured and
+// the difficulty was adjusted)
 // TODO: add pool feature where nodes have ID's to mine more efficiently
-// TODO: implement multi threading (look at how multithreaded web sockets are made in rust) (currently working on)
 // TODO: add Docs to functions
-// TODO: add mined block confirmation by other nodes and kill mining process of current block if nonce found by another node
-// TODO: make it more Bitcoin like? -> https://developer.bitcoin.org/devguide/index.html
 // TODO: improve returning errors by using Result<val, Error> instead of Result<val, ()>
 // TODO: improve logging
 // TODO: remove everyhthing with //debug comment
-// TODO: save blockchain to continue later?
 // TODO: cleanup imports
 // TODO: remove warnings by cargo
-// TODO: the miner should be run as release? (so the command might not be optimal)
+// TODO: real signatures and real wallet addresses
+// TODO: multi signatures
 // Resource: https://medium.com/learning-lab/how-cryptocurrencies-work-technical-guide-95950c002b8f
+//
+// TODO: in far future:
+// - the miner should be run as release? (so the command might not be optimal)
+//
+// TODO: Optional:
+// - encrypt traffic between nodes?
+// - save blockchain to continue later?

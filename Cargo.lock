@@ -3,22 +3,6 @@
 version = 3
 
 [[package]]
-name = "CatCoin"
-version = "0.1.0"
-dependencies = [
- "base64",
- "chrono",
- "clap",
- "num-bigint",
- "rand",
- "regex",
- "serde",
- "serde_json",
- "sha2",
- "uuid",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -116,6 +100,22 @@ name = "bumpalo"
 version = "3.15.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ea184aa71bb362a1157c896979544cc23974e08fd265f29ea96b59f0b4a555b"
+
+[[package]]
+name = "cat_coin"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "clap",
+ "num-bigint",
+ "rand",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "uuid",
+]
 
 [[package]]
 name = "cc"

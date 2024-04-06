@@ -8,10 +8,28 @@ from hashlib import sha256
 from time import sleep
 
 
-ADDRESS = "127.0.0.1:8000"
+def get_difficulty(d:int) -> int: 
+    return int(
+        'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF'.replace(
+            'F' * d, '0' * d, 1
+        ), base=16
+    )
 
 
-def merkle_hash(l:list[str]) -> str:
+def mine_block(block:dict, target_value:int):
+    """Create a new Block, hash it and return it."""
+    i = 0
+    val = target_value + 1
+    while val > target_value:
+        i += 1
+        hash = sha256(f"{block['index']}${block['timestamp']}${block['merkle']}${i}".encode())
+        val = int.from_bytes(hash.digest())
+        block['nonce'] = i
+        block['hash'] = hash.hexdigest()
+    return block 
+
+
+def merkle_hash(l:list[str]) -> str | None:
     """Hash everything of iterable together to one hash by using the merkle tree."""
     new = []
     count = len(l) - 1
@@ -31,22 +49,21 @@ def merkle_hash(l:list[str]) -> str:
     else: return None
 
 
-def datetime_now() -> str:
-    date = datetime.now().astimezone().isoformat().split('+')
-    return f'{date[0]}000+{date[1]}'
+def timestamp_now() -> float:
+    return round(datetime.now().timestamp())
 
 
 def transaction() -> dict: 
     """Create transaction."""
     src = str(uuid4())
     dst = str(uuid4())
-    date = datetime_now()
+    timestamp = timestamp_now()
     val = randint(1, 20)
-    hash_ = sha256(f'{src}${dst}${date}${val}'.encode()).hexdigest()
+    hash_ = sha256(f'{src}${dst}${timestamp}${val}'.encode()).hexdigest()
     return {
         "src": src,
         "dst": dst,
-        "date": date,
+        "timestamp": timestamp,
         "val": val,
         "broadcast": True,
         "hash": hash_
@@ -56,23 +73,22 @@ def transaction() -> dict:
 def block(idx: int, prev_hash: str) -> dict:
     """Create block."""
     transactions = list(transaction() for _ in range(randint(1, 4)))
-    nonce = randint(0, 1000)
-    datetime_ = datetime_now()
+    timestamp = timestamp_now()
     merkle = merkle_hash(list(i['hash'] for i in transactions))
     return {
         "index": idx,
-        "datetime": datetime_,
+        "timestamp": timestamp,
         "transactions": transactions,
         "previous_hash": prev_hash,
-        "nonce": 0, # nonce,
-        "hash": sha256(f'{idx}${datetime_}${merkle}${nonce}'.encode()).hexdigest(),
+        "nonce": 0, 
+        "hash": "", 
         "merkle": merkle
     }
 
 
-def send(dtype: int, data:dict) -> dict:
+def send(dtype: int, data:dict, addr:tuple) -> dict:
     """Send message."""
-    with create_connection(ADDRESS.split(":")) as con:
+    with create_connection(addr) as con:
         con.send(dumps({"dtype": dtype, "data": data}).encode())
         con.shutdown(SHUT_WR)
         res = con.recv(4096).decode()
@@ -89,43 +105,51 @@ if __name__ == '__main__':
     parser.add_argument('-d', '--delay', default=0.0, type=float, help='seconds between repeating message')
     parser.add_argument('-i', '--index', default=1, type=int, help='index of block to send')
     parser.add_argument('-p', '--previous_hash', default='', type=str, help='hash of previous block')
+    parser.add_argument('--difficulty', default=14, type=int, help='difficulty of hash')
+    parser.add_argument('--address', default='127.0.0.1:8000', type=str, help='address of node')
     args = vars(parser.parse_args())
+    
+    ADDRESS = args['address'].split(':')
 
+    # add peer 
     if args['type'] == 'add-peer':
         for i in range(args['count']):
-            # addr = f"{randint(0, 256)}.{randint(0, 256)}.{randint(0, 256)}.{randint(0, 256)}:{randint(0, 65536)}"
-            addr = "127.0.0.1:8081"
-            res = send(0, {"addr": addr})
+            addr = input("address: ")
+            res = send(0, {"addr": addr}, ADDRESS)
             if res.get("res") == 0: print("success")
             else: print("failed")
     
+    # get peers 
     elif args['type'] == 'get-peers':
-        res = send(1, {})
+        res = send(1, {}, ADDRESS)
         print(res.get('data'))
 
+    # send transaction
     elif args['type'] == 'transaction':
         for i in range(args['count']):
-            res = send(2, transaction())
+            res = send(2, transaction(), ADDRESS)
             print(f'response: {res.get("res")}')
             sleep(args['delay'])
     
+    # get transaction pool
     elif args['type'] == 'get-pool':
-        res = send(3, {})
+        res = send(3, {}, ADDRESS)
         print(res.get('res'))
-
+    
+    # send block
     elif args['type'] == 'block': 
         if not args['previous_hash']: 
             print('no previous hash found')
             exit(1)
 
-        data = block(args['index'], args['previous_hash'])
-        for _ in range(args['count']):
-            res = send(4, data)
-            print(f'response: {res.get("res")}')
-            data = block(args['index'], data['previous_hash'])
-
+        data = mine_block(block(args['index'], args['previous_hash']), get_difficulty(args['difficulty']))
+        res = send(4, data, ADDRESS) 
+        print(f'response: {res.get("res")}')
+        data = block(args['index'], data['previous_hash'])
+        
+    # get blockchain 
     elif args['type'] == 'blockchain':
-        res = send(5, {})
+        res = send(5, {}, ADDRESS)
         print(f'blockchain:\n{res.get("data")}'.replace("'", '"').replace('True', 'true',).replace('False', 'false'))
     
     else: parser.print_help()
