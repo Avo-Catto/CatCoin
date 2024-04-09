@@ -7,14 +7,15 @@ use std::{env, io::stdin, process::exit, thread};
 
 #[derive(Debug, Deserialize)]
 struct Receiver {
-    start: u64,
-    difficulty: u8,
     block: serde_json::Value,
+    difficulty: u8,
+    start: u64,
 }
 
-fn hash_block(target_val: BigUint, block: &mut Block, mut start: u64) {
+/// Mine the given block.
+fn mine(target_val: BigUint, block: &mut Block, mut start: u64) {
     let check_skip = thread::spawn(|| match stdin().read_line(&mut String::new()) {
-        Ok(_) => (), // eprintln!("DEBUG[MINERBIN] - skip block"), // DEBUG
+        Ok(_) => (),
         Err(e) => eprintln!(
             "[#] MINERBIN - skip current block read stdin error: {:?}",
             e
@@ -28,38 +29,50 @@ fn hash_block(target_val: BigUint, block: &mut Block, mut start: u64) {
         if check_skip.is_finished() {
             exit(0);
         }
-
         // calculate hash and get value
         val = BigUint::parse_bytes(block.calc_hash(start).as_bytes(), 16).unwrap();
-        start += 1;
-        // TODO: if nonce exeeds data type, continue at 0
-        // TODO: and find a way to transfer this huge number using max u64 data type
-        // maybe modulo or something...
+
+        // check if nonce exeeds data type
+        if start == u64::MAX {
+            start = 0
+        } else {
+            start += 1;
+        }
     }
 }
 
 fn main() {
-    // TODO: error handling
     let args: Vec<String> = env::args().collect(); // collect args
     let decoded = STANDARD.decode(&args[1]).unwrap(); // decode base64
-    let json_string = String::from_utf8(decoded).unwrap(); // parse to string
-    let json: Receiver = serde_json::from_str(&json_string).unwrap(); // deserialize to json
+    let json_string = match String::from_utf8(decoded) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("[#] MINERBIN - string from bytes error: {}", e);
+            exit(1);
+        }
+    };
+    // deserialize to json
+    let json: Receiver = serde_json::from_str(&json_string).unwrap();
 
     // construct block from json
     let mut block = match Block::from_json(&json.block) {
         Ok(n) => n,
         Err(e) => {
-            eprint!("{:?}", e);
+            eprint!("[#] MINERBIN - construct block from json error: {:?}", e);
             exit(1);
         }
     };
 
     // hash block
-    hash_block(get_difficulty(json.difficulty), &mut block, json.start);
+    mine(get_difficulty(json.difficulty), &mut block, json.start);
 
     // serialize output
-    let json = json!({"nonce": &block.nonce, "merkle": &block.merkle, "hash": &block.hash}); // format json string
-    let encoded = STANDARD.encode(format!("{}", json)); // encode using base64
+    let json = json!({
+        "hash": &block.hash,
+        "merkle": &block.merkle,
+        "nonce": &block.nonce,
+    });
+    let encoded = STANDARD.encode(format!("{}", json));
     print!("{}", encoded); // return data
     exit(0);
 }
