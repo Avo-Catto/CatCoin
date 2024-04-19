@@ -29,7 +29,7 @@ def mine_block(block:dict, target_value:int):
     return block 
 
 
-def merkle_hash(l:list[str]) -> str | None:
+def merkle_hash(l:list[str]) -> str:
     """Hash everything of iterable together to one hash by using the merkle tree."""
     new = []
     count = len(l) - 1
@@ -46,7 +46,7 @@ def merkle_hash(l:list[str]) -> str | None:
     # check on how to continue
     if count > 1: return merkle_hash(new)
     if len(new) == 1: return new[0]
-    else: return None
+    else: return ''
 
 
 def timestamp_now() -> float:
@@ -70,9 +70,8 @@ def transaction() -> dict:
     }
 
 
-def block(idx: int, prev_hash: str) -> dict:
+def block(idx: int, prev_hash: str, transactions: list) -> dict:
     """Create block."""
-    transactions = list(transaction() for _ in range(randint(1, 4)))
     timestamp = timestamp_now()
     merkle = merkle_hash(list(i['hash'] for i in transactions))
     return {
@@ -86,21 +85,20 @@ def block(idx: int, prev_hash: str) -> dict:
     }
 
 
-def send(dtype: int, data:dict, addr:tuple) -> dict:
+def send(dtype: str, data, addr:tuple) -> str:
     """Send message."""
     with create_connection(addr) as con:
-        con.send(dumps({"dtype": dtype, "data": data}).encode())
+        con.send(dumps({"dtype": dtype, "data": str(data).replace("'", "\"").replace("True", "true").replace("False", "false")}).encode())
         con.shutdown(SHUT_WR)
         res = con.recv(4096).decode()
-        print(f'received: {res}')
-        res = loads(res)
+        # res = loads(res)
         return res
 
 
 if __name__ == '__main__':
     # Argument Parser
     parser = ArgumentParser()
-    parser.add_argument('-t', '--type', default=None, type=str, help='block / transaction / blockchain / add-peer')
+    parser.add_argument('-t', '--type', default=None, type=str, help='block / transaction / blockchain / add-peer / hash / difficulty / latest')
     parser.add_argument('-c', '--count', default=1, type=int, help='how many messages should be send')
     parser.add_argument('-d', '--delay', default=0.0, type=float, help='seconds between repeating message')
     parser.add_argument('-i', '--index', default=1, type=int, help='index of block to send')
@@ -115,41 +113,61 @@ if __name__ == '__main__':
     if args['type'] == 'add-peer':
         for i in range(args['count']):
             addr = input("address: ")
-            res = send(0, {"addr": addr}, ADDRESS)
-            if res.get("res") == 0: print("success")
-            else: print("failed")
-    
+            res = send("AddPeer", addr, ADDRESS)
+            print(f"Response: {res}")
+
     # get peers 
     elif args['type'] == 'get-peers':
-        res = send(1, {}, ADDRESS)
-        print(res.get('data'))
+        res = send("GetPeers", "", ADDRESS)
+        print(f'response: {res}')
 
     # send transaction
     elif args['type'] == 'transaction':
         for i in range(args['count']):
-            res = send(2, transaction(), ADDRESS)
-            print(f'response: {res.get("res")}')
+            res = send("AddTransaction", transaction(), ADDRESS)
+            print(f'Response: {res}')
             sleep(args['delay'])
     
     # get transaction pool
     elif args['type'] == 'get-pool':
-        res = send(3, {}, ADDRESS)
-        print(res.get('res'))
+        res = send("GetTransactionPool", "", ADDRESS)
+        print(f'response: {res}')
     
     # send block
     elif args['type'] == 'block': 
-        if not args['previous_hash']: 
-            print('no previous hash found')
-            exit(1)
+        # get transaction pool
+        res = loads(send("GetTransactionPool", "", ADDRESS))
+        transactions = res['res']
 
-        data = mine_block(block(args['index'], args['previous_hash']), get_difficulty(args['difficulty']))
-        res = send(4, data, ADDRESS) 
-        print(f'response: {res.get("res")}')
-        data = block(args['index'], data['previous_hash'])
+        # get latest block
+        res = send("GetLatestBlock", "", ADDRESS).replace("true", "True").replace("false", "False")
+        res_json = loads(res)
+        block_json = loads(res_json['res'])
+        block_data = block(block_json['index'] + 1, block_json['hash'], transactions)
+
+        # get difficulty & peers
+        difficulty_res = loads(send("GetDifficulty", "", ADDRESS))
+        peers = loads(send("GetPeers", "", ADDRESS))['res']
+        peers.append(':'.join(ADDRESS))
+
+        # mine block
+        data = mine_block(block_data, get_difficulty(difficulty_res['res']))
+        for i in peers:
+            res = send("PostBlock", data, i.split(':')) 
+            print(f'response: {res}')
         
     # get blockchain 
     elif args['type'] == 'blockchain':
-        res = send(5, {}, ADDRESS)
-        print(f'blockchain:\n{res.get("data")}'.replace("'", '"').replace('True', 'true',).replace('False', 'false'))
+        res = send("GetBlockchain", "", ADDRESS)
+        print(f'response:\n{res}'.replace("'", '"').replace('True', 'true',).replace('False', 'false'))
     
+    # get difficulty
+    elif args['type'] == 'difficulty':
+        res = send("GetDifficulty", "", ADDRESS)
+        print(f'response: {res}')
+
+    elif args['type'] == 'latest':
+        res = send("GetLatestBlock", "", ADDRESS)
+        print(f'response: {res}')
+
     else: parser.print_help()

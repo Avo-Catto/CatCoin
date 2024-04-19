@@ -1,32 +1,16 @@
-mod lib;
-
-use crate::lib::{
-    broadcast, check_addr, get_difficulty, respond_code, respond_json, send_string, subtract_vec,
-    Block, BlockChain, MineController, Transaction, TransactionPool,
-};
 use clap::Parser;
 use num_bigint::BigUint;
-use serde::Deserialize;
 use serde_json::json;
 use std::{
     io::Read,
-    net::{Shutdown, TcpListener, TcpStream},
+    net::{Shutdown, TcpListener},
     process::exit,
+    str::FromStr,
     sync::{Arc, Mutex},
     thread,
 };
 
-#[derive(Deserialize, Debug)]
-struct RequestReceiver {
-    dtype: i8,
-    data: serde_json::Value,
-}
-
-#[derive(Deserialize, Debug)]
-struct ResponseReceiver {
-    res: i8,
-    data: serde_json::Value,
-}
+use cat_coin::{blockchain::*, comm::*, utils::*};
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -75,95 +59,45 @@ fn main() {
 
     // get blockchain from another node
     if !args.genisis && check_addr(&args.entry) {
-        println!("[+] SYNC - updating blockchain");
-
-        // connect to node
-        let stream = match TcpStream::connect(&args.entry) {
-            Ok(n) => n,
+        match blockchain.lock().unwrap().sync(&args.entry) {
+            Ok(_) => (),
             Err(e) => {
-                eprintln!("[#] SYNC - connection error: {}", e);
+                eprintln!("[#] BLOCKCHAIN:SYNC - failed check error: {}", e);
                 exit(1);
             }
-        };
-
-        // request and receive blockchain
-        let buffer = match send_string(&stream, "{\"dtype\":5, \"data\":{}}".to_string()) {
-            Ok(n) => n,
-            Err(e) => {
-                eprintln!("[#] SYNC - receive chain error: {}", e);
-                exit(1);
-            }
-        };
-
-        // load json from buffer
-        let json: ResponseReceiver = match serde_json::from_str(&buffer) {
-            Ok(n) => n,
-            Err(e) => {
-                eprintln!("[#] SYNC - parsing blockchain error: {}", e);
-                exit(1);
-            }
-        };
-
-        // construct blocks from json
-        let rcvd_chain = json.data.as_array().unwrap().to_vec();
-        let mut chain: Vec<Block> = Vec::new();
-        for i in rcvd_chain {
-            // construct block
-            match Block::from_json(&i) {
-                Ok(n) => chain.push(n),
-                Err(e) => {
-                    eprintln!("[#] SYNC - parsing block error: {:?}", e);
-                    exit(1);
-                }
-            };
         }
-
-        // add blocks to chain
-        let mut blockchain = blockchain.lock().unwrap();
-        blockchain.set_chain(chain);
-        println!("[+] SYNC - blockchain update successful");
-
     // if no entry node specified
     } else if !args.genisis {
         eprintln!("[#] SYNC - no entry node specified");
         exit(1);
     }
 
-    // synchronizing transaction pool & list of peers
+    // synchronizing transaction pool
     if !args.genisis {
-        // get transaction pool
         println!("[+] SYNC - updating transaction pool");
 
-        // connect to node
-        let stream = match TcpStream::connect(&args.entry) {
+        // craft request
+        let req = Request {
+            dtype: Dtype::GetTransactionPool,
+            data: "",
+        };
+        // send request
+        let stream = match request(&args.entry, &req) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("[#] SYNC - connection error: {}", e);
+                eprintln!("[#] SYNC - request transaction pool error: {}", e);
                 exit(1);
             }
         };
-
-        // receive transaction pool
-        let buffer = match send_string(&stream, String::from("{\"dtype\": 3, \"data\":{}}")) {
+        // receive data
+        let response: Response<Vec<serde_json::Value>> = match receive(stream) {
             Ok(n) => n,
             Err(e) => {
                 eprintln!("[#] SYNC - receive transaction pool error: {}", e);
                 exit(1);
             }
         };
-
-        // load json from buffer
-        let json: ResponseReceiver = match serde_json::from_str(&buffer) {
-            Ok(n) => n,
-            Err(e) => {
-                respond_code(&stream, 1);
-                eprintln!("[#] SYNC - failed parsing transaction pool: {}", e);
-                exit(1);
-            }
-        };
-
-        // cast json into vector
-        let transactions = json.data.as_array().unwrap().to_vec();
+        let transactions = response.res;
 
         // update transactions if any
         if transactions.len() > 0 {
@@ -199,78 +133,101 @@ fn main() {
             println!("[+] SYNC - no update required");
         }
 
-        // get list of peers
+        // update list of peers
         println!("[+] SYNC - updating list of peers");
 
-        // connect to node
-        let stream = match TcpStream::connect(&args.entry) {
+        // craft request
+        let req = Request {
+            dtype: Dtype::GetPeers,
+            data: "",
+        };
+        // send request
+        let stream = match request(&args.entry, &req) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("[#] SYNC - connection error: {}", e);
+                eprintln!("[#] SYNC - request list of peers error: {}", e);
                 exit(1);
             }
         };
-
         // receive list of peers
-        let buffer = match send_string(&stream, String::from("{\"dtype\": 1, \"data\":{}}")) {
+        let response: Response<Vec<String>> = match receive(stream) {
             Ok(n) => n,
             Err(e) => {
                 eprintln!("[#] SYNC - receive list of peers error: {}", e);
                 exit(1);
             }
         };
+        let mut peers_rcved = response.res;
 
-        // load json from buffer
-        let json: ResponseReceiver = match serde_json::from_str(&buffer) {
-            Ok(n) => n,
-            Err(e) => {
-                respond_code(&stream, 1);
-                eprintln!("[#] SYNC - failed parsing peers: {}", e);
-                exit(1);
-            }
-        };
-
-        // validate peers
-        let mut peers = peers.lock().unwrap();
-        *peers = json
-            .data
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|x| x.to_string().replace("\"", ""))
-            .collect();
-
-        // find invalid peers
+        // check peers
         let mut rm: Vec<String> = Vec::new();
-        for peer in peers.clone() {
+        for peer in &peers_rcved {
             if !check_addr(&peer) {
-                rm.push(peer);
+                rm.push(peer.to_owned());
             }
         }
-
         // log
         if rm.len() > 0 {
             println!("[!] SYNC - invalid peers removed: {}", rm.len());
         }
-
         // remove invalid peers
-        *peers = subtract_vec(peers.to_vec(), rm);
-        peers.push(args.entry.clone()); // add entry node
+        peers_rcved = subtract_vec(peers_rcved, rm);
+        peers_rcved.push(args.entry.clone()); // add entry node
 
         // broadcast address to peers
         println!("[+] SYNC - broadcasting address");
-        rm = broadcast(&peers, 0, &format!("{{\"addr\":\"{}\"}}", addr));
+        let (responses, rm) = broadcast::<AddPeerResponse>(&peers_rcved, Dtype::AddPeer, &addr);
+        println!("DEBUG - AddPeer responses: {:?}", responses); // DEBUG
 
         // remove unreachable peers & update peers
-        *peers = subtract_vec(peers.to_vec(), rm);
+        let mut peers = peers.lock().unwrap(); // lock mutex
+        *peers = subtract_vec(peers_rcved, rm); // update peers
         println!("[+] SYNC - update list of peers successful");
+
+        // synchronize difficulty
+        println!("[+] SYNC - updating difficulty");
+
+        // craft request
+        let req = Request {
+            dtype: Dtype::GetDifficulty,
+            data: "",
+        };
+        // connect to node
+        let stream = match request(&args.entry, &req) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[#] SYNC - request difficulty error: {}", e);
+                exit(1);
+            }
+        };
+        // receive difficulty
+        let response: Response<u8> = match receive(stream) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[#] SYNC - receive difficulty error: {}", e);
+                exit(1);
+            }
+        };
+        // check difficulty
+        // TODO: check difficulty
+        // update difficulty
+        *difficulty.lock().unwrap() = response.res;
+        println!("[+] SYNC - update difficulty successful")
     }
+
+    // DEBUG
+    println!(
+        "DEBUG - blockchain: {:?}",
+        blockchain.lock().unwrap().get_chain()
+    );
 
     // log stuff
     println!("[+] SETUP - listening on: {}", addr);
     println!(
         "[+] SETUP - genisis hash: {}",
-        blockchain.lock().unwrap().get_latest().unwrap().hash
+        blockchain.lock().unwrap().get_latest().unwrap().hash // FIXME: panics on unwrap error
+                                                              // maybe the chain isn't updated
+                                                              // correctly????
     );
     println!("[+] MINER - target value: {:?}", {
         get_difficulty(*difficulty.lock().unwrap())
@@ -305,198 +262,235 @@ fn main() {
             stream.read_to_string(&mut buffer).unwrap();
             stream.shutdown(Shutdown::Read).unwrap();
 
+            {
+                // DEBUG
+                match serde_json::from_str::<Request<String>>(&buffer) {
+                    Ok(n) => {
+                        println!("DEBUG:\n> Dtype: {:?}\n> Data: {}", n.dtype, n.data);
+                        println!("RAW: {}", buffer);
+                    }
+                    Err(e) => {
+                        eprintln!("DEBUG - debug receive error: {}", e);
+                        println!("RAW: {}", buffer);
+                    }
+                };
+            }
+
             // load json from buffer
-            let data: RequestReceiver = match serde_json::from_str(&buffer) {
+            let response: Request<String> = match serde_json::from_str(&buffer) {
                 Ok(n) => n,
                 Err(e) => {
-                    respond_code(&stream, 1);
                     eprintln!("[#] LISTENER - receive data error: {}", e);
                     return;
                 }
             };
 
-            // add peer
-            if data.dtype == 0 {
-                // get option of data
-                let data_opt = data.data.get("addr");
+            match response.dtype {
+                Dtype::AddPeer => {
+                    let peer = response.data;
 
-                // if address is not none
-                let peer = if !data_opt.is_none() {
-                    data_opt.unwrap().to_string().replace("\"", "")
+                    // check address
+                    if !check_addr(&peer) {
+                        respond(&stream, AddPeerResponse::FailedCheck);
+                        eprintln!("[#] DTYPE:AddPeer - check failed");
+                        return;
+                    }
+                    // add peer to list if not already contained
+                    let mut peers = peers.lock().unwrap();
+                    if !peers.contains(&peer) {
+                        peers.push(peer);
+                        respond(&stream, AddPeerResponse::Success);
 
-                // otherwise break
-                } else {
-                    respond_code(&stream, 1);
-                    eprintln!("[#] DTYPE:0 - received none value");
+                    // if already in list
+                    } else {
+                        respond(&stream, AddPeerResponse::AlreadyExist);
+                    }
+                }
+
+                Dtype::AddTransaction => {
+                    // load data as json
+                    let data = match serde_json::Value::from_str(&response.data) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            respond(&stream, AddTransactionResponse::ParsingError);
+                            eprintln!("[#] DTYPE:AddTransaction - parse to json error: {}", e);
+                            return;
+                        }
+                    };
+                    // construct transaction
+                    let mut transaction = match Transaction::from_json(&data) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            respond(&stream, AddTransactionResponse::ConstructionError);
+                            eprintln!("[#] DTYPE:AddTransaction - construction error: {:?}", e);
+                            return;
+                        }
+                    };
+                    // check transaction
+                    match transaction.validate() {
+                        Ok(_) => {}
+                        Err(e) => {
+                            respond(&stream, AddTransactionResponse::FailedCheck);
+                            eprintln!("[#] DTYPE:AddTransaction - check failed: {:?}", e);
+                            return;
+                        }
+                    }
+                    // broadcast transaction
+                    let mut peers = peers.lock().unwrap();
+                    if transaction.broadcast {
+                        transaction.broadcast = false; // disable broadcast
+                        let (_, failed) = broadcast::<AddTransactionResponse>(
+                            &peers,
+                            Dtype::AddTransaction,
+                            &transaction.as_json().to_string(),
+                        ); // broadcast
+                        *peers = subtract_vec(peers.to_vec(), failed); // remove unreachable peers
+                    }
+                    // add transaction to pool
+                    let mut pool = transactionpool.lock().unwrap();
+                    match pool.add(&transaction) {
+                        Ok(_) => {
+                            println!("[+] DTYPE:AddTransaction - added:\n{}", transaction);
+                            respond(&stream, AddTransactionResponse::Success);
+                        }
+                        Err(e) => {
+                            respond(&stream, AddTransactionResponse::DuplicatedTransaction);
+                            eprintln!("[#] DTYPE:AddTransaction - transaction not added: {:?}", e);
+                            return;
+                        }
+                    }
+                }
+
+                // TODO: finish check_blockchain method
+                Dtype::CheckBlockchain => respond(&stream, CheckBlockchainResponse::Success),
+
+                Dtype::GetBlockchain => {
+                    let chain = blockchain.lock().unwrap(); // lock blockchain
+                    let blocks: Vec<String> = chain
+                        .get_chain()
+                        .iter()
+                        .map(|x| x.as_json().to_string())
+                        .collect(); // convert blocks to json
+                    respond(&stream, blocks); // respond blockchain
                     return;
-                };
-
-                // check address
-                if !check_addr(&peer) {
-                    respond_code(&stream, 1);
-                    eprintln!("[#] DTYPE:0 - address invalid");
-                    return;
                 }
 
-                // add peer to list if not already contained
-                let mut peers = peers.lock().unwrap();
-                if !peers.contains(&peer) {
-                    peers.push(peer);
-                    respond_code(&stream, 0);
-
-                // if already in list
-                } else {
-                    respond_code(&stream, 0);
+                Dtype::GetDifficulty => {
+                    respond(&stream, difficulty.lock().unwrap());
                 }
 
-            // get peers
-            } else if data.dtype == 1 {
-                // respond list of peers
-                respond_json(&stream, json!(*peers.lock().unwrap()));
+                Dtype::GetLatestBlock => match blockchain.lock().unwrap().get_latest() {
+                    Ok(n) => respond(&stream, n.as_json().to_string()),
+                    Err(_) => respond(&stream, json!({})),
+                },
 
-            // add Transaction
-            } else if data.dtype == 2 {
-                // construct transaction
-                let mut transaction = match Transaction::from_json(&data.data) {
-                    Ok(n) => n,
-                    Err(e) => {
-                        respond_code(&stream, 1);
-                        eprintln!("[#] DTYPE:2 - construction failed: {:?}", e);
-                        return;
-                    }
-                };
-
-                // perform some checks on the transaction
-                match transaction.validate() {
-                    Ok(_) => {}
-                    Err(e) => {
-                        respond_code(&stream, 1);
-                        eprintln!("[#] DTYPE:2 - transaction invalid: {:?}", e);
-                        return;
-                    }
+                Dtype::GetPeers => {
+                    respond(&stream, peers.lock().unwrap());
                 }
 
-                // distribute transaction to all nodes
-                let mut peers = peers.lock().unwrap();
-                if transaction.broadcast {
-                    // overwrite transaction and parse into json string
-                    transaction.broadcast = false; // disable broadcast
-                    let transaction = transaction.as_json().to_string(); // serialize transaction
-
-                    // broadcast peers
-                    let failed = broadcast(&peers, 2, &transaction);
-
-                    // remove unreachable peers
-                    *peers = subtract_vec(peers.to_vec(), failed);
+                Dtype::GetTransactionPool => {
+                    let pool: Vec<serde_json::Value> = transactionpool
+                        .lock()
+                        .unwrap()
+                        .pool
+                        .iter()
+                        .map(|x| x.as_json())
+                        .collect();
+                    respond(&stream, pool);
                 }
 
-                // add transaction to pool
-                let mut pool = transactionpool.lock().unwrap();
-                match pool.add(&transaction) {
-                    Ok(_) => {
-                        println!("[+] DTYPE:2 - transaction added\n\n{}", transaction.str());
-                        respond_code(&stream, 0);
+                Dtype::PostBlock => {
+                    // load data as json
+                    let data = match serde_json::Value::from_str(&response.data) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            respond(&stream, PostBlockResponse::ParsingJsonError);
+                            eprintln!("[#] DTYPE:PostBlock - parse to json: {:?}", e);
+                            return;
+                        }
+                    };
+                    // construct block
+                    let block = match Block::from_json(&data) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            respond(&stream, PostBlockResponse::ConstructionError);
+                            eprintln!("[#] DTYPE:PostBlock - construction error: {:?}", e);
+                            return;
+                        }
+                    };
+                    {
+                        // debug
+                        println!("\n\nReceived:\n{}\n", block);
+                        println!(
+                            "\n\nCurrent:\n{}\n",
+                            mine_controller.current_block.lock().unwrap()
+                        );
                     }
-                    Err(e) => {
-                        respond_code(&stream, 1);
-                        eprintln!("[#] DTYPE:2 - transaction not added: {:?}", e);
-                        return;
+                    // parse hash difficulty
+                    let val = match BigUint::parse_bytes(block.hash.as_bytes(), 16) {
+                        Some(n) => n,
+                        None => {
+                            respond(&stream, PostBlockResponse::ParsingHashValError);
+                            eprintln!("[#] DTYPE:PostBlock - parse hash value error");
+                            return;
+                        }
+                    };
+                    {
+                        // check hash difficulty
+                        if val > get_difficulty(*difficulty.lock().unwrap()) {
+                            respond(&stream, PostBlockResponse::MismatchHashDifficulty);
+                            eprintln!("[#] DTYPE:PostBlock - invalid hash difficulty");
+                            return;
+                        }
                     }
-                }
-
-            // get transaction pool
-            } else if data.dtype == 3 {
-                // respend transaction pool
-                respond_json(&stream, json!(*transactionpool.lock().unwrap().pool));
-
-            // validate block
-            } else if data.dtype == 4 {
-                // construct block
-                let block = match Block::from_json(&data.data) {
-                    Ok(n) => n,
-                    Err(_) => {
-                        respond_code(&stream, 1);
-                        eprintln!("[#] DTYPE:4 - Block::from_json() failed");
-                        return;
+                    // check block
+                    match block.validate() {
+                        Ok(_) => println!("[+] DTYPE:PostBlock - block valid"),
+                        Err(e) => {
+                            respond(&stream, PostBlockResponse::ValidationError);
+                            eprintln!("[#] DTYPE:PostBlock - block invalid: {:?}", e);
+                            return;
+                        }
                     }
-                };
-
-                {
-                    // debug
-                    println!("\n\nReceived:\n{}\n", block.str());
-                    println!(
-                        "\n\nCurrent:\n{}\n",
-                        mine_controller.current_block.lock().unwrap().str()
-                    );
-                }
-
-                // parse hash difficulty
-                let val = match BigUint::parse_bytes(block.hash.as_bytes(), 16) {
-                    Some(n) => n,
-                    None => {
-                        respond_code(&stream, 3);
-                        eprintln!("[#] DTYPE:4 - parse hash value error");
-                        return;
+                    {
+                        // check if block matches currently mined block
+                        if block != *mine_controller.current_block.lock().unwrap() {
+                            respond(&stream, PostBlockResponse::MismatchCurrentlyMinedBlock);
+                            eprintln!(
+                                "[#] DTYPE:PostBlock - block doesn't match currently mined block"
+                            );
+                            return;
+                        }
                     }
-                };
-                {
-                    // check hash difficulty
-                    if val > get_difficulty(*difficulty.lock().unwrap()) {
-                        respond_code(&stream, 3);
-                        eprintln!("[#] DTYPE:4 - invalid hash difficulty");
-                        return;
-                    }
-                }
-
-                // check block
-                match block.validate() {
-                    Ok(_) => println!("[+] DTYPE:4 - block valid"),
-                    Err(e) => {
-                        respond_code(&stream, 3);
-                        eprintln!("[#] DTYPE:4 - block invalid: {:?}", e);
-                        return;
-                    }
-                }
-                {
-                    // check if block matches currently mined block
-                    if block != *mine_controller.current_block.lock().unwrap() {
-                        respond_code(&stream, 3);
-                        eprintln!("[#] DTYPE:4 - block doesn't match currently mined block");
-                        return;
-                    }
-                }
-
-                // add block to chain
-                match blockchain.lock().unwrap().add_block(&block) {
-                    Ok(_) => {
-                        mine_controller.skip(); // skip currently mined block
-                        println!("[+] DTYPE:4 - add block to chain succeed");
-                        respond_code(&stream, 2);
-                    }
-                    Err(e) => {
-                        eprintln!("[#] DTYPE:4 - add block to chain error: {:?}", e);
-                        respond_code(&stream, 3);
+                    // add block to chain
+                    match blockchain.lock().unwrap().add_block(&block) {
+                        Ok(_) => {
+                            mine_controller.skip(); // skip currently mined block
+                            println!("[+] DTYPE:PostBlock - add block to chain succeed");
+                            respond(&stream, PostBlockResponse::Success);
+                        }
+                        Err(e) => {
+                            eprintln!("[#] DTYPE:PostBlock - add block to chain error: {:?}", e);
+                            respond(&stream, PostBlockResponse::AddToChainError);
+                        }
                     }
                 }
-
-            // request blockchain
-            } else if data.dtype == 5 {
-                // respond blockchain
-                let chain = blockchain.lock().unwrap(); // lock blockchain
-                let blocks: Vec<serde_json::Value> =
-                    chain.get_chain().iter().map(|x| x.as_json()).collect(); // convert blocks to json
-                respond_json(&stream, json!(blocks)); // respond blockchain
-                return;
             }
         });
     }
 }
 
-// NOW:
-//  - other todos in the code
-
+// > TODO: enums are still wrong serialized/deserialized by the nodes
+// > TODO: continue working on resyncing blockchain if block doesn't match
+// TODO: make node broadcast transaction even it's invalid
+// TODO: check what happens if multiple nodes receive the same transaction at the same time
+// TODO: how are coins generated?
+// TODO: check if miner is compiled -> if not then compile it and run the binary instead of cargo
+// TODO: limit amount of transactions (or rather size of blocks)
 // TODO: check if chain is still valid sometimes (every 10 blocks when the time was measured and
-// the difficulty was adjusted)
+//       the difficulty was adjusted)
+// TODO: make difficulty adjustable (maybe by amount of miners)
+// TODO: replace str method of blockchain related object with fmt::Display
 // TODO: add pool feature where nodes have ID's to mine more efficiently
 // TODO: add Docs to functions
 // TODO: improve returning errors by using Result<val, Error> instead of Result<val, ()>
@@ -506,6 +500,8 @@ fn main() {
 // TODO: remove warnings by cargo
 // TODO: real signatures and real wallet addresses
 // TODO: multi signatures
+// TODO: block reward
+// TODO: blurring for anonymity
 // Resource: https://medium.com/learning-lab/how-cryptocurrencies-work-technical-guide-95950c002b8f
 //
 // TODO: in far future:
@@ -514,3 +510,4 @@ fn main() {
 // TODO: Optional:
 // - encrypt traffic between nodes?
 // - save blockchain to continue later?
+// - full and half nodes..?

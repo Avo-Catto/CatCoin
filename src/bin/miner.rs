@@ -1,5 +1,6 @@
+use cat_coin::{blockchain::Block, utils::get_difficulty};
+
 use base64::{engine::general_purpose::STANDARD, Engine};
-use cat_coin::{get_difficulty, Block};
 use num_bigint::BigUint;
 use serde::Deserialize;
 use serde_json::json;
