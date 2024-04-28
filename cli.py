@@ -98,28 +98,39 @@ def send(dtype: str, data, addr:tuple) -> str:
 if __name__ == '__main__':
     # Argument Parser
     parser = ArgumentParser()
-    parser.add_argument('-t', '--type', default=None, type=str, help='block / transaction / blockchain / add-peer / hash / difficulty / latest')
+    parser.add_argument('-t', '--type', default=None, type=str, help='block / transaction / blockchain / add-peer / hash / difficulty / latest / resync / pool / get-block')
     parser.add_argument('-c', '--count', default=1, type=int, help='how many messages should be send')
     parser.add_argument('-d', '--delay', default=0.0, type=float, help='seconds between repeating message')
-    parser.add_argument('-i', '--index', default=1, type=int, help='index of block to send')
-    parser.add_argument('-p', '--previous_hash', default='', type=str, help='hash of previous block')
     parser.add_argument('--difficulty', default=14, type=int, help='difficulty of hash')
     parser.add_argument('--address', default='127.0.0.1:8000', type=str, help='address of node')
     args = vars(parser.parse_args())
     
     ADDRESS = args['address'].split(':')
 
+    # get latest hash
+    if args['type'] == 'hash':
+        for i in range(args['count']):
+            res = send("GetLatestHash", "", ADDRESS)
+            print(f"response: {res}")
+
+    # send resync chain request
+    elif args['type'] == 'resync':
+        for i in range(args['count']):
+            res = send("CheckBlockchain", "", ADDRESS)
+            print(f'response: {res}')
+
     # add peer 
-    if args['type'] == 'add-peer':
+    elif args['type'] == 'add-peer':
         for i in range(args['count']):
             addr = input("address: ")
             res = send("AddPeer", addr, ADDRESS)
-            print(f"Response: {res}")
+            print(f'response: {res}')
 
     # get peers 
     elif args['type'] == 'get-peers':
-        res = send("GetPeers", "", ADDRESS)
-        print(f'response: {res}')
+        for i in range(args['count']):
+            res = send("GetPeers", "", ADDRESS)
+            print(f'response: {res}')
 
     # send transaction
     elif args['type'] == 'transaction':
@@ -168,6 +179,15 @@ if __name__ == '__main__':
 
     elif args['type'] == 'latest':
         res = send("GetLatestBlock", "", ADDRESS)
+        print(f'response: {res}')
+
+    elif args['type'] == 'pool':
+        res = send("GetPoolHash", "", ADDRESS)
+        print(f'response: {res}')
+
+    elif args['type'] == 'get-block':
+        idx = input('index: ')
+        res = send("GetBlock", idx, ADDRESS)
         print(f'response: {res}')
 
     else: parser.print_help()

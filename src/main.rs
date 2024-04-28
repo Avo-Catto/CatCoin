@@ -1,5 +1,7 @@
+use cat_coin::{blockchain::*, comm::*, utils::*};
 use clap::Parser;
 use num_bigint::BigUint;
+use rand::{seq::SliceRandom, thread_rng};
 use serde_json::json;
 use std::{
     io::Read,
@@ -9,8 +11,6 @@ use std::{
     sync::{Arc, Mutex},
     thread,
 };
-
-use cat_coin::{blockchain::*, comm::*, utils::*};
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -44,7 +44,6 @@ fn main() {
         eprintln!("[#] ARGS - invalid difficulty (allowed: 1 - 71)");
         exit(1);
     }
-
     // format address
     let addr = format!("{}:{}", args.ip, args.port);
 
@@ -225,9 +224,7 @@ fn main() {
     println!("[+] SETUP - listening on: {}", addr);
     println!(
         "[+] SETUP - genisis hash: {}",
-        blockchain.lock().unwrap().get_latest().unwrap().hash // FIXME: panics on unwrap error
-                                                              // maybe the chain isn't updated
-                                                              // correctly????
+        blockchain.lock().unwrap().get_latest().unwrap().hash
     );
     println!("[+] MINER - target value: {:?}", {
         get_difficulty(*difficulty.lock().unwrap())
@@ -277,17 +274,20 @@ fn main() {
             }
 
             // load json from buffer
-            let response: Request<String> = match serde_json::from_str(&buffer) {
+            let request: Request<String> = match serde_json::from_str(&buffer) {
                 Ok(n) => n,
                 Err(e) => {
                     eprintln!("[#] LISTENER - receive data error: {}", e);
-                    return;
+                    Request {
+                        dtype: Dtype::Skip,
+                        data: String::new(),
+                    }
                 }
             };
 
-            match response.dtype {
+            match request.dtype {
                 Dtype::AddPeer => {
-                    let peer = response.data;
+                    let peer = request.data;
 
                     // check address
                     if !check_addr(&peer) {
@@ -309,7 +309,7 @@ fn main() {
 
                 Dtype::AddTransaction => {
                     // load data as json
-                    let data = match serde_json::Value::from_str(&response.data) {
+                    let data = match serde_json::Value::from_str(&request.data) {
                         Ok(n) => n,
                         Err(e) => {
                             respond(&stream, AddTransactionResponse::ParsingError);
@@ -356,13 +356,72 @@ fn main() {
                         Err(e) => {
                             respond(&stream, AddTransactionResponse::DuplicatedTransaction);
                             eprintln!("[#] DTYPE:AddTransaction - transaction not added: {:?}", e);
-                            return;
                         }
                     }
                 }
 
-                // TODO: finish check_blockchain method
-                Dtype::CheckBlockchain => respond(&stream, CheckBlockchainResponse::Success),
+                // TODO: prevent dos attack here
+                // TODO: resync because of reason!?!
+                // TODO: stop miner entirely and start after resync
+                Dtype::CheckBlockchain => {
+                    respond(&stream, CheckBlockchainResponse::Success);
+                    let map = collect_map(&peers.lock().unwrap(), Dtype::GetLatestHash, "");
+                    let latest_hash = match get_key_by_vec_len(map.clone()) {
+                        Some(n) => n,
+                        None => return,
+                    };
+
+                    let mut chain = blockchain.lock().unwrap();
+                    if latest_hash != chain.get_latest().unwrap().hash {
+                        loop {
+                            let peer = map[&latest_hash].choose(&mut thread_rng()).unwrap();
+                            match chain.sync(&peer) {
+                                Ok(_) => break,
+                                Err(e) => {
+                                    eprintln!("[#] BLOCKCHAIN:SYNC - failed check error: {}", e);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Dtype::GetBlock => {
+                    // lock chain & parse index
+                    let chain = blockchain.lock().unwrap();
+                    let length = chain.get_chain().len();
+                    let idx = {
+                        // if requested latest block
+                        if request.data == "-1" {
+                            length - 1
+                        } else {
+                            // otherwise parse index
+                            match request.data.parse::<usize>() {
+                                Ok(n) => n,
+                                Err(e) => {
+                                    respond(&stream, "");
+                                    eprintln!("[#] DTYPE:GetBlock - parse index error: {}", e);
+                                    return;
+                                }
+                            }
+                        }
+                    };
+                    // check if index in range
+                    if idx > chain.get_chain().len() - 1 {
+                        respond(&stream, "");
+                    }
+                    // get block and respond
+                    match chain.get(idx) {
+                        Some(n) => {
+                            let json = json!({
+                                "block": n.as_json(),
+                                "len": length,
+                            });
+                            respond(&stream, json.to_string());
+                        }
+                        None => respond(&stream, ""),
+                    };
+                }
 
                 Dtype::GetBlockchain => {
                     let chain = blockchain.lock().unwrap(); // lock blockchain
@@ -372,16 +431,28 @@ fn main() {
                         .map(|x| x.as_json().to_string())
                         .collect(); // convert blocks to json
                     respond(&stream, blocks); // respond blockchain
-                    return;
                 }
 
                 Dtype::GetDifficulty => {
                     respond(&stream, difficulty.lock().unwrap());
                 }
 
-                Dtype::GetLatestBlock => match blockchain.lock().unwrap().get_latest() {
-                    Ok(n) => respond(&stream, n.as_json().to_string()),
-                    Err(_) => respond(&stream, json!({})),
+                Dtype::GetLatestHash => match blockchain.lock().unwrap().get_latest() {
+                    Ok(n) => respond(&stream, n.hash),
+                    Err(_) => respond(&stream, ""),
+                },
+
+                Dtype::GetPoolHash => match merkle_hash(
+                    transactionpool
+                        .lock()
+                        .unwrap()
+                        .pool
+                        .iter()
+                        .map(|x| x.hash.clone())
+                        .collect(),
+                ) {
+                    Some(n) => respond(&stream, n),
+                    None => respond(&stream, ""),
                 },
 
                 Dtype::GetPeers => {
@@ -401,7 +472,7 @@ fn main() {
 
                 Dtype::PostBlock => {
                     // load data as json
-                    let data = match serde_json::Value::from_str(&response.data) {
+                    let data = match serde_json::Value::from_str(&request.data) {
                         Ok(n) => n,
                         Err(e) => {
                             respond(&stream, PostBlockResponse::ParsingJsonError);
@@ -475,13 +546,18 @@ fn main() {
                         }
                     }
                 }
+
+                Dtype::Skip => {}
             }
         });
     }
 }
 
-// > TODO: enums are still wrong serialized/deserialized by the nodes
 // > TODO: continue working on resyncing blockchain if block doesn't match
+// TODO: don't forget to also resync transaction pool
+// TODO: fix doesn't mine correct block after resync of blockchain
+// TODO: fix resync if received block is invalid, but blockchain is valid, it's resyncing anyway
+// TODO: make the node only resyncing until it's valid again
 // TODO: make node broadcast transaction even it's invalid
 // TODO: check what happens if multiple nodes receive the same transaction at the same time
 // TODO: how are coins generated?
@@ -495,6 +571,7 @@ fn main() {
 // TODO: add Docs to functions
 // TODO: improve returning errors by using Result<val, Error> instead of Result<val, ()>
 // TODO: improve logging
+// TODO: replace sha256 regex checks with the function to do that
 // TODO: remove everyhthing with //debug comment
 // TODO: cleanup imports
 // TODO: remove warnings by cargo

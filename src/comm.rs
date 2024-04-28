@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::Digest;
 use std::{
     error::Error,
     io::{Read, Write},
@@ -23,7 +22,7 @@ impl std::fmt::Debug for AddPeerResponse {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub enum AddTransactionResponse {
     ConstructionError,
     DuplicatedTransaction,
@@ -31,26 +30,31 @@ pub enum AddTransactionResponse {
     ParsingError,
     Success,
 }
+impl std::fmt::Debug for AddTransactionResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AddTransactionResponse::ConstructionError => write!(f, "\"ConstructionError\""),
+            AddTransactionResponse::DuplicatedTransaction => write!(f, "\"DuplicatedTransaction\""),
+            AddTransactionResponse::FailedCheck => write!(f, "\"FailedCheck\""),
+            AddTransactionResponse::ParsingError => write!(f, "\"ParsingError\""),
+            AddTransactionResponse::Success => write!(f, "\"Success\""),
+        }
+    }
+}
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub enum CheckBlockchainResponse {
     Success,
 }
-
-#[derive(Deserialize, Debug, Serialize)]
-pub enum Dtype {
-    AddPeer,
-    AddTransaction,
-    CheckBlockchain,
-    GetBlockchain,
-    GetDifficulty,
-    GetLatestBlock,
-    GetPeers,
-    GetTransactionPool,
-    PostBlock,
+impl std::fmt::Debug for CheckBlockchainResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CheckBlockchainResponse::Success => write!(f, "\"Success\""),
+        }
+    }
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Deserialize, PartialEq)]
 pub enum PostBlockResponse {
     AddToChainError,
     ConstructionError,
@@ -60,6 +64,44 @@ pub enum PostBlockResponse {
     ParsingJsonError,
     Success,
     ValidationError,
+}
+impl std::fmt::Debug for PostBlockResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PostBlockResponse::AddToChainError => write!(f, "\"AddToChainError\""),
+            PostBlockResponse::ConstructionError => write!(f, "\"ConstructionError\""),
+            PostBlockResponse::MismatchCurrentlyMinedBlock => {
+                write!(f, "\"MismatchCurrentlyMinedBlock\"")
+            }
+            PostBlockResponse::MismatchHashDifficulty => write!(f, "\"MismatchHashDifficulty\""),
+            PostBlockResponse::ParsingHashValError => write!(f, "\"ParsingHashValError\""),
+            PostBlockResponse::ParsingJsonError => write!(f, "\"ParsingJsonError\""),
+            PostBlockResponse::Success => write!(f, "\"Success\""),
+            PostBlockResponse::ValidationError => write!(f, "\"ValidationError\""),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct GetBlockReceiver {
+    block: serde_json::Value,
+    len: u64,
+}
+
+#[derive(Deserialize, Debug, Serialize)]
+pub enum Dtype {
+    AddPeer,
+    AddTransaction,
+    CheckBlockchain,
+    GetBlock,
+    GetBlockchain,
+    GetDifficulty,
+    GetLatestHash,
+    GetPeers,
+    GetPoolHash,
+    GetTransactionPool,
+    PostBlock,
+    Skip,
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,7 +126,7 @@ struct _ResponseReceiver<T> {
 pub fn broadcast<T>(
     peers: &Vec<String>,
     dtype: Dtype,
-    data: &String,
+    data: &str,
 ) -> (Vec<Response<T>>, Vec<String>)
 where
     T: serde::de::DeserializeOwned + std::fmt::Debug,
@@ -124,17 +166,16 @@ pub fn receive<T>(mut stream: TcpStream) -> Result<Response<T>, Box<dyn Error>>
 where
     T: serde::de::DeserializeOwned,
 {
+    // get ip address
+    let addr = match stream.peer_addr() {
+        Ok(n) => n.to_string(),
+        Err(e) => return Err(Box::new(e)),
+    };
     // receive response
     let mut buf = String::new();
     stream.read_to_string(&mut buf).unwrap();
 
     println!("DEBUG - RECEIVED: {}", buf); // DEBUG
-
-    // get ip address
-    let addr = match stream.local_addr() {
-        Ok(n) => n.to_string(),
-        Err(e) => return Err(Box::new(e)),
-    };
 
     // parse response
     match serde_json::from_str::<_ResponseReceiver<T>>(&buf) {
@@ -162,7 +203,7 @@ where
     }
 }
 
-pub fn request<T>(addr: &String, req: &Request<T>) -> Result<TcpStream, Box<dyn Error>>
+pub fn request<T>(addr: &str, req: &Request<T>) -> Result<TcpStream, Box<dyn Error>>
 where
     T: serde::Serialize,
 {
