@@ -1,8 +1,10 @@
-use crate::{blockchain::*, comm::*};
+use crate::blockchain::BlockChain;
+use crate::comm::*;
 use chrono::Utc;
 use num_bigint::BigUint;
 use regex::Regex;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 
 #[derive(Debug)]
 pub enum BlockError {
@@ -56,24 +58,37 @@ pub fn check_addr(addr: &String) -> bool {
     addr_re.is_match(addr)
 }
 
-// TODO: make the chain resynchronize by a node where most equal hashes are
-/// Check if blockchain has to be resynced.
-/// Returns `false` if chain has to be resynced, otherwise `true`
-pub fn check_chain(latest_block: &Block, peers: &Vec<String>) -> bool {
-    let mut correct: u32 = 0;
-    let (responses, _) = broadcast::<String>(peers, Dtype::GetLatestBlock, &String::new());
+/// Returns `true` if blockchain has to be synchronized and `false` if not.
+pub fn check_sync(peers: &Vec<String>, chain: &BlockChain) -> Result<bool, ()> {
+    // check blockchain
+    let map = collect_map(peers, Dtype::GetBlock, "-1");
+    let latest_hash = match get_key_by_vec_len(map.clone()) {
+        Some(n) => n,
+        None => return Err(()),
+    };
 
-    for i in &responses {
-        // compare hashes
-        println!("DEBUG - check_chain received: {:?}", i);
-    }
+    Ok(false)
+}
 
-    // return result
-    if correct >= responses.len().try_into().unwrap() {
-        return true;
-    } else {
-        return false;
+/// Performs a regex check for a SHA256 hash.
+pub fn check_sha256(hash_str: &String) -> bool {
+    let sha256_re = Regex::new("^[a-fA-F0-9]{64}$").unwrap();
+    sha256_re.is_match(hash_str)
+}
+
+/// Collect all responses and addresses of nodes on a specific request. The response will be the
+/// key and the list of peers who sent the same responses will be the value.
+pub fn collect_map(peers: &Vec<String>, dtype: Dtype, data: &str) -> HashMap<String, Vec<String>> {
+    let (responses, _) = broadcast::<String>(peers, dtype, data);
+    let mut collection = HashMap::new();
+    for i in responses {
+        // check if hash already in map and add address otherwise create new entry
+        collection
+            .entry(i.res)
+            .and_modify(|peers: &mut Vec<String>| peers.push(i.addr.clone()))
+            .or_insert(vec![i.addr]);
     }
+    collection
 }
 
 /// Returns the target value.
@@ -86,13 +101,32 @@ pub fn get_difficulty(difficulty: u8) -> BigUint {
     BigUint::parse_bytes(hex_str.as_bytes(), 16).unwrap()
 }
 
+/// Function to get the key of a HashMap by the length of the value.
+pub fn get_key_by_vec_len<V>(map: HashMap<String, Vec<V>>) -> Option<String> {
+    let mut max = match map.keys().last() {
+        Some(n) => n.to_string(),
+        None => return None,
+    };
+    for key in map.keys() {
+        // check if length of vec is greater
+        if map[key].len() > map[&max].len() {
+            max = key.clone();
+        }
+    }
+    Some(max)
+}
+
 /// Returns the SHA256 hash of a byte array.
 pub fn hash_str(data: &[u8]) -> String {
     format!("{:x}", Sha256::digest(data))
 }
 
 /// Recursive function that hashes all strings of a vector in pairs together to one hash using SHA256.
-pub fn merkle_hash(data: Vec<String>) -> Result<String, ()> {
+pub fn merkle_hash(data: Vec<String>) -> Option<String> {
+    // check if list is empty
+    if data.len() == 0 {
+        return None;
+    }
     // check if length of list is even
     let len = data.len() - 1;
     let even: bool = match len % 2 {
@@ -100,7 +134,6 @@ pub fn merkle_hash(data: Vec<String>) -> Result<String, ()> {
         0 => false,
         _ => false, // this will never happen
     };
-
     // merge hash
     let mut output: Vec<String> = Vec::new();
     let mut hash_input: String;
@@ -112,19 +145,17 @@ pub fn merkle_hash(data: Vec<String>) -> Result<String, ()> {
         hash = hash_str(hash_input.as_bytes());
         output.push(hash);
     }
-
     if !even {
         // append hash of last element if not even
         hash = hash_str(data[len].as_bytes());
         output.push(hash);
     }
-
     if len > 1 {
         merkle_hash(output) // if elements left
     } else if output.len() == 1 {
-        Ok(output[0].clone()) // return output
+        Some(output[0].clone()) // return output
     } else {
-        Err(())
+        None
     }
 }
 

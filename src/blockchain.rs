@@ -1,12 +1,13 @@
 use crate::{comm::*, utils::*};
 use base64::{engine::general_purpose::STANDARD, Engine};
-use rand::{thread_rng, Rng};
+use rand::{seq::SliceRandom, thread_rng, Rng};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     any::Any,
     error::Error,
+    fmt::Result,
     io::{BufReader, BufWriter, Read, Write},
     panic::catch_unwind,
     process::{exit, Child, Command, Stdio},
@@ -164,7 +165,7 @@ impl Block {
             json.get("previous_hash")
                 .unwrap()
                 .to_string()
-                .replace("\"", ""),
+                .replace('"', ""),
         );
         // update values
         block.timestamp = json
@@ -202,12 +203,16 @@ impl std::fmt::Display for Block {
 #[derive(Clone)]
 pub struct BlockChain {
     chain: Vec<Block>,
+    syncing: Arc<Mutex<bool>>,
 }
 
 impl BlockChain {
     /// Constructor
     pub fn new() -> BlockChain {
-        BlockChain { chain: Vec::new() }
+        BlockChain {
+            chain: Vec::new(),
+            syncing: Arc::new(Mutex::new(false)),
+        }
     }
 
     /// Construct the blockchain with a genisis block.
@@ -253,7 +258,9 @@ impl BlockChain {
     }
 
     /// Updates the chain.
+    /// `Note:` The entire chain will be deleted!
     pub fn set_chain(&mut self, chain: Vec<Block>) -> Result<(), Box<dyn Error>> {
+        self.chain.clear();
         for block in &chain {
             // check block
             match block.validate() {
@@ -267,6 +274,11 @@ impl BlockChain {
             }
         }
         Ok(())
+    }
+
+    /// Return block by index.
+    pub fn get(&self, idx: usize) -> Option<&Block> {
+        self.chain.get(idx)
     }
 
     /// Returns the blockchain.
@@ -288,7 +300,12 @@ impl BlockChain {
     /// Synchronize blockchain by a node.
     pub fn sync(&mut self, addr: &String) -> Result<(), Box<dyn Error>> {
         println!("[+] BLOCKCHAIN:SYNC - updating blockchain");
-
+        {
+            // lock chain while syncing
+            let mut lock = self.syncing.lock().unwrap();
+            *lock = true;
+            println!("DEBUG - syncing lock active now"); // DEBUG
+        }
         // craft request
         let req = Request {
             dtype: Dtype::GetBlockchain,
@@ -332,7 +349,59 @@ impl BlockChain {
         // add blocks to chain
         let out = self.set_chain(chain);
         println!("[+] BLOCKCHAIN:SYNC - blockchain update successful");
+        {
+            // unlock chain
+            println!("DEBUG - syncing deactivating lock"); // DEBUG
+            *self.syncing.lock().unwrap() = false;
+        }
         out
+    }
+
+    pub fn sync_new(&mut self, addr: &str) -> Result<(), dyn Error> {
+        println!("[+] BLOCKCHAIN:SYNC - updating blockchain");
+
+        let length = u64::MAX;
+        let idx: u64 = 0;
+        while idx < length - 1 {
+            // craft request
+            let req = Request {
+                dtype: Dtype::GetBlock,
+                data: idx,
+            };
+            // send request
+            let stream = match request(addr, &req) {
+                Ok(n) => n,
+                Err(e) => {
+                    eprintln!("[#] BLOCKCHAIN:SYNC - get block error: {}", e);
+                    exit(1);
+                }
+            };
+            // receive data
+            let response: Response<&str> = match receive(stream) {
+                Ok(n) => n,
+                Err(e) => {
+                    eprintln!("[#] BLOCKCHAIN:SYNC - receive block error: {}", e);
+                    exit(1);
+                }
+            };
+            // parse to json
+            let json = match serde_json::Value::from_str(response.res) {
+                Ok(n) => n,
+                Err(e) => {
+                    eprintln!("[#] BLOCKCHAIN:SYNC - parsing to json error: {:?}", e);
+                    exit(1);
+                }
+            };
+            // construct block
+            match Block::from_json(&json) {
+                Ok(n) => (), // TODO: self.chain.push(),
+                Err(e) => {
+                    eprintln!("[#] BLOCKCHAIN:SYNC - parsing block error: {:?}", e);
+                    exit(1);
+                }
+            };
+        }
+        Ok(())
     }
 }
 
@@ -398,10 +467,7 @@ impl MineController {
         thread::spawn(move || {
             loop {
                 // clone and lock required mutex objects
-                let chain = {
-                    let lock = self_arc.blockchain.lock().unwrap();
-                    lock.clone()
-                };
+                let chain = { self_arc.blockchain.lock().unwrap().clone() };
                 let mut pool = {
                     let mut lock = self_arc.transactionpool.lock().unwrap();
                     let tmp = lock.clone();
@@ -533,7 +599,7 @@ impl MineController {
                         println!("DEBUG - checking responses of nodes!"); // debug
                         let mut peers = self_arc.peers.lock().unwrap(); // lock peers
 
-                        // broadcast block // FIXME: no responses
+                        // broadcast block
                         (responses, failed) = broadcast::<PostBlockResponse>(
                             &peers,
                             Dtype::PostBlock,
@@ -567,16 +633,58 @@ impl MineController {
                     // compare responses
                     if disagree.len() > (agree.len() + disagree.len()) / 2 {
                         println!("DEBUG - more than 50% of the nodes disagreed with the block"); // DEBUG
-                                                                                                 // TODO: check blockchain and resync if necessary
 
-                        if check_chain(&chain.get_latest().unwrap(), &peers) {
-                            println!("[+] MINER - synchronize blockchain!!!!!!!!!!!!!!!!!!!!!!!!");
-                            // TODO: resync here
+                        // stop mining // TODO: I have to stop the miner in any way and start
+                        // mining after the resync
+                        if !self_arc.skip() {
+                            eprintln!("MINER - stop miner error: ?"); // DEBUG
+                        };
+
+                        // collect hashes and find hash where most peers agreed with
+                        let map = collect_map(&peers, Dtype::GetLatestHash, "");
+                        let key = match get_key_by_vec_len(map.clone()) {
+                            Some(n) => n,
+                            None => continue,
+                        };
+
+                        // ensure the chain wasn't updated already
+                        let latest = {
+                            self_arc
+                                .blockchain
+                                .lock()
+                                .unwrap()
+                                .get_latest()
+                                .unwrap()
+                                .clone()
+                        };
+                        if key == latest.hash {
+                            // TODO: fix that chain resyncs 4 times
+                            continue;
+                        }
+
+                        // resync blockchain // TODO: make it better
+                        for _ in 0..map[&key].len() {
+                            // get random address
+                            let addr = map[&key].choose(&mut thread_rng()).unwrap();
+                            println!("DEBUG - peer to sync from: {}", addr);
+
+                            // resync blockchain
+                            match self_arc.blockchain.lock().unwrap().sync(addr) {
+                                Ok(_) => break,
+                                Err(e) => {
+                                    eprintln!("[#] BLOCKCHAIN:SYNC - failed check error: {}", e);
+                                }
+                            }
                         }
                         continue;
                     } else {
-                        // TODO: work in progress, maybe if I improve the responses in future
-                        println!("DEBUG - less than 50%... means accepted");
+                        // request resync of peers of nodes who disagreed
+                        println!("[+] MINER - network accepted block");
+                        broadcast::<CheckBlockchainResponse>(
+                            &disagree,
+                            Dtype::CheckBlockchain,
+                            &String::new(),
+                        );
                     }
                 }
                 {
@@ -716,6 +824,7 @@ pub struct TransactionPool {
     pub pool: Vec<Transaction>,
 }
 
+// TODO: sync function
 impl TransactionPool {
     /// Constructor
     pub fn new() -> TransactionPool {
