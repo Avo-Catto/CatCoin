@@ -84,8 +84,8 @@ impl std::fmt::Debug for PostBlockResponse {
 
 #[derive(Deserialize)]
 pub struct GetBlockReceiver {
-    block: serde_json::Value,
-    len: u64,
+    pub block: serde_json::Value,
+    pub len: u64,
 }
 
 #[derive(Deserialize, Debug, Serialize)]

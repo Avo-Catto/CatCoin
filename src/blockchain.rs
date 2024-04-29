@@ -7,7 +7,6 @@ use serde_json::json;
 use std::{
     any::Any,
     error::Error,
-    fmt::Result,
     io::{BufReader, BufWriter, Read, Write},
     panic::catch_unwind,
     process::{exit, Child, Command, Stdio},
@@ -298,109 +297,69 @@ impl BlockChain {
     }
 
     /// Synchronize blockchain by a node.
-    pub fn sync(&mut self, addr: &String) -> Result<(), Box<dyn Error>> {
+    pub fn sync(&mut self, addr: &str) -> Result<(), Box<dyn Error>> {
         println!("[+] BLOCKCHAIN:SYNC - updating blockchain");
-        {
-            // lock chain while syncing
-            let mut lock = self.syncing.lock().unwrap();
-            *lock = true;
-            println!("DEBUG - syncing lock active now"); // DEBUG
-        }
-        // craft request
-        let req = Request {
-            dtype: Dtype::GetBlockchain,
-            data: "",
-        };
-        // send request
-        let stream = match request(addr, &req) {
-            Ok(n) => n,
-            Err(e) => {
-                eprintln!("[#] BLOCKCHAIN:SYNC - request blockchain error: {}", e);
-                exit(1);
-            }
-        };
-        // receive data
-        let response: Response<Vec<String>> = match receive(stream) {
-            Ok(n) => n,
-            Err(e) => {
-                eprintln!("[#] BLOCKCHAIN:SYNC - receive blockchain error: {}", e);
-                exit(1);
-            }
-        };
-        // construct blocks from json
-        let mut chain: Vec<Block> = Vec::new();
-        for i in response.res {
-            let json = match serde_json::Value::from_str(&i) {
-                Ok(n) => n,
-                Err(e) => {
-                    eprintln!("[#] BLOCKCHAIN:SYNC - parsing to json error: {:?}", e);
-                    exit(1);
-                }
-            };
-            // construct block
-            match Block::from_json(&json) {
-                Ok(n) => chain.push(n),
-                Err(e) => {
-                    eprintln!("[#] BLOCKCHAIN:SYNC - parsing block error: {:?}", e);
-                    exit(1);
-                }
-            };
-        }
-        // add blocks to chain
-        let out = self.set_chain(chain);
-        println!("[+] BLOCKCHAIN:SYNC - blockchain update successful");
-        {
-            // unlock chain
-            println!("DEBUG - syncing deactivating lock"); // DEBUG
-            *self.syncing.lock().unwrap() = false;
-        }
-        out
-    }
+        self.chain.clear(); // clear chain
 
-    pub fn sync_new(&mut self, addr: &str) -> Result<(), dyn Error> {
-        println!("[+] BLOCKCHAIN:SYNC - updating blockchain");
+        // get blocks from other node
+        let mut length: u64 = 2;
+        let mut idx: u64 = 0;
 
-        let length = u64::MAX;
-        let idx: u64 = 0;
+        // TODO: does length even get updated dynamically?
         while idx < length - 1 {
             // craft request
             let req = Request {
                 dtype: Dtype::GetBlock,
-                data: idx,
+                data: idx.to_string(),
             };
             // send request
             let stream = match request(addr, &req) {
                 Ok(n) => n,
                 Err(e) => {
                     eprintln!("[#] BLOCKCHAIN:SYNC - get block error: {}", e);
-                    exit(1);
+                    continue;
                 }
             };
             // receive data
-            let response: Response<&str> = match receive(stream) {
+            let response: Response<String> = match receive(stream) {
                 Ok(n) => n,
                 Err(e) => {
                     eprintln!("[#] BLOCKCHAIN:SYNC - receive block error: {}", e);
-                    exit(1);
+                    continue;
                 }
             };
+            println!("DEBUG - response: {:?}", response);
             // parse to json
-            let json = match serde_json::Value::from_str(response.res) {
+            let data: GetBlockReceiver = match serde_json::from_str(response.res.as_str()) {
                 Ok(n) => n,
                 Err(e) => {
                     eprintln!("[#] BLOCKCHAIN:SYNC - parsing to json error: {:?}", e);
-                    exit(1);
+                    continue;
                 }
             };
             // construct block
-            match Block::from_json(&json) {
-                Ok(n) => (), // TODO: self.chain.push(),
+            let block = match Block::from_json(&data.block) {
+                Ok(n) => n,
                 Err(e) => {
                     eprintln!("[#] BLOCKCHAIN:SYNC - parsing block error: {:?}", e);
-                    exit(1);
+                    continue;
                 }
             };
+            // add block to chain
+            match self.add_block(&block) {
+                Ok(_) => {
+                    idx += 1;
+                    length = data.len;
+                    println!(
+                        "[+] BLOCKCHAIN:SYNC - [ {} / {} ] synchronizing...",
+                        idx,
+                        length - 1
+                    );
+                }
+                Err(e) => eprintln!("[#] BLOCKCHAIN:SYNC - adding block error: {}", e),
+            }
         }
+        println!("[+] BLOCKCHAIN:SYNC - blockchain update successful");
         Ok(())
     }
 }
@@ -591,6 +550,7 @@ impl MineController {
                     }
                 }
                 {
+                    // TODO: it blocks the mining process I guess
                     // broadcast block & update peers
                     let responses: Vec<Response<PostBlockResponse>>;
                     let failed: Vec<String>;

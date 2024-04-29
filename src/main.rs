@@ -211,7 +211,7 @@ fn main() {
         // TODO: check difficulty
         // update difficulty
         *difficulty.lock().unwrap() = response.res;
-        println!("[+] SYNC - update difficulty successful")
+        println!("[+] SYNC - update difficulty successful");
     }
 
     // DEBUG
@@ -417,6 +417,7 @@ fn main() {
                                 "block": n.as_json(),
                                 "len": length,
                             });
+                            println!("DEBUG - get block: {}", json.to_string());
                             respond(&stream, json.to_string());
                         }
                         None => respond(&stream, ""),
@@ -553,14 +554,16 @@ fn main() {
     }
 }
 
-// > TODO: continue working on resyncing blockchain if block doesn't match
+// > TODO: check if lenth variable in blockchain::sync() function updates dynamically
+// > TODO: make the miner stop completely & start it until blockchain is up to date again
+// > TODO: write sync functions for other parts of node
 // TODO: don't forget to also resync transaction pool
 // TODO: fix doesn't mine correct block after resync of blockchain
 // TODO: fix resync if received block is invalid, but blockchain is valid, it's resyncing anyway
 // TODO: make the node only resyncing until it's valid again
 // TODO: make node broadcast transaction even it's invalid
 // TODO: check what happens if multiple nodes receive the same transaction at the same time
-// TODO: how are coins generated?
+// TODO: how are coins generated? -> smart contract
 // TODO: check if miner is compiled -> if not then compile it and run the binary instead of cargo
 // TODO: limit amount of transactions (or rather size of blocks)
 // TODO: check if chain is still valid sometimes (every 10 blocks when the time was measured and
