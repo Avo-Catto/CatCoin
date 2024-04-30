@@ -39,6 +39,21 @@ impl std::error::Error for BlockChainError {}
 #[derive(Debug)]
 pub enum PoolError {
     DuplicatedTransaction,
+    InvalidTransaction,
+}
+impl std::fmt::Display for PoolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+impl std::error::Error for PoolError {}
+
+#[derive(Debug)]
+pub enum SyncState {
+    Fine,
+    Needed,
+    Ready,
+    Running,
 }
 
 #[derive(Debug)]
@@ -58,8 +73,9 @@ pub fn check_addr(addr: &String) -> bool {
     addr_re.is_match(addr)
 }
 
-/// Returns `true` if blockchain has to be synchronized and `false` if not.
-pub fn check_sync(peers: &Vec<String>, chain: &BlockChain) -> Result<bool, ()> {
+// TODO: write this function
+// Check if node needs to synchronize.
+pub fn check_sync(peers: &Vec<String>, chain: &BlockChain) -> Result<SyncState, ()> {
     // check blockchain
     let map = collect_map(peers, Dtype::GetBlock, "-1");
     let latest_hash = match get_key_by_vec_len(map.clone()) {
@@ -67,7 +83,7 @@ pub fn check_sync(peers: &Vec<String>, chain: &BlockChain) -> Result<bool, ()> {
         None => return Err(()),
     };
 
-    Ok(false)
+    Ok(SyncState::Fine)
 }
 
 /// Performs a regex check for a SHA256 hash.

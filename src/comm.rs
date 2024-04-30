@@ -175,8 +175,6 @@ where
     let mut buf = String::new();
     stream.read_to_string(&mut buf).unwrap();
 
-    println!("DEBUG - RECEIVED: {}", buf); // DEBUG
-
     // parse response
     match serde_json::from_str::<_ResponseReceiver<T>>(&buf) {
         Ok(n) => Ok(Response { addr, res: n.res }),

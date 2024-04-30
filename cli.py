@@ -98,7 +98,7 @@ def send(dtype: str, data, addr:tuple) -> str:
 if __name__ == '__main__':
     # Argument Parser
     parser = ArgumentParser()
-    parser.add_argument('-t', '--type', default=None, type=str, help='block / transaction / blockchain / add-peer / hash / difficulty / latest / resync / pool / get-block')
+    parser.add_argument('-t', '--type', default=None, type=str, help='block / transaction / blockchain / add-peer / hash / difficulty / latest / resync / pool / get-pool / get-block')
     parser.add_argument('-c', '--count', default=1, type=int, help='how many messages should be send')
     parser.add_argument('-d', '--delay', default=0.0, type=float, help='seconds between repeating message')
     parser.add_argument('--difficulty', default=14, type=int, help='difficulty of hash')

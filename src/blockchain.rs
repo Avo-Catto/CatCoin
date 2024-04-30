@@ -202,7 +202,7 @@ impl std::fmt::Display for Block {
 #[derive(Clone)]
 pub struct BlockChain {
     chain: Vec<Block>,
-    syncing: Arc<Mutex<bool>>,
+    syncing: Arc<Mutex<SyncState>>,
 }
 
 impl BlockChain {
@@ -210,7 +210,7 @@ impl BlockChain {
     pub fn new() -> BlockChain {
         BlockChain {
             chain: Vec::new(),
-            syncing: Arc::new(Mutex::new(false)),
+            syncing: Arc::new(Mutex::new(SyncState::Ready)),
         }
     }
 
@@ -297,7 +297,18 @@ impl BlockChain {
     }
 
     /// Synchronize blockchain by a node.
-    pub fn sync(&mut self, addr: &str) -> Result<(), Box<dyn Error>> {
+    pub fn sync(&mut self, addr: &str) -> Result<SyncState, Box<dyn Error>> {
+        {
+            // check if currently syncing
+            let mut state = self.syncing.lock().unwrap();
+            match *state {
+                SyncState::Ready => {
+                    // set syncing state
+                    *state = SyncState::Running;
+                }
+                _ => return Ok(SyncState::Running),
+            }
+        }
         println!("[+] BLOCKCHAIN:SYNC - updating blockchain");
         self.chain.clear(); // clear chain
 
@@ -305,8 +316,8 @@ impl BlockChain {
         let mut length: u64 = 2;
         let mut idx: u64 = 0;
 
-        // TODO: does length even get updated dynamically?
-        while idx < length - 1 {
+        // TODO: I can just length - 1 for testing purpose
+        while idx < length {
             // craft request
             let req = Request {
                 dtype: Dtype::GetBlock,
@@ -328,7 +339,6 @@ impl BlockChain {
                     continue;
                 }
             };
-            println!("DEBUG - response: {:?}", response);
             // parse to json
             let data: GetBlockReceiver = match serde_json::from_str(response.res.as_str()) {
                 Ok(n) => n,
@@ -350,17 +360,17 @@ impl BlockChain {
                 Ok(_) => {
                     idx += 1;
                     length = data.len;
-                    println!(
-                        "[+] BLOCKCHAIN:SYNC - [ {} / {} ] synchronizing...",
-                        idx,
-                        length - 1
-                    );
+                    println!("[+] BLOCKCHAIN:SYNC - [ {} / {} ]", idx, length);
                 }
                 Err(e) => eprintln!("[#] BLOCKCHAIN:SYNC - adding block error: {}", e),
             }
         }
         println!("[+] BLOCKCHAIN:SYNC - blockchain update successful");
-        Ok(())
+        {
+            // set syncing state
+            *self.syncing.lock().unwrap() = SyncState::Ready;
+        }
+        Ok(SyncState::Fine)
     }
 }
 
@@ -703,28 +713,32 @@ impl Transaction {
         let transaction = catch_unwind(|| {
             let mut transaction = Self::new(
                 json.get("src")
-                    .unwrap()
+                    .expect("Transaction::from_json: src")
                     .as_str()
-                    .expect("Transaction::from_json: src"),
+                    .expect("Transaction::from_json: src as str"),
                 json.get("dst")
-                    .unwrap()
+                    .expect("Transaction::from_json: dst")
                     .as_str()
-                    .expect("Transaction::from_json: dst"),
+                    .expect("Transaction::from_json: dst as str"),
                 json.get("val")
-                    .unwrap()
+                    .expect("Transaction::from_json: val")
                     .as_f64()
-                    .expect("Transaction::from_json: val"),
+                    .expect("Transaction::from_json: val as f64"),
                 json.get("broadcast")
-                    .unwrap()
+                    .expect("Transaction::from_json: broadcast")
                     .as_bool()
-                    .expect("Transaction::from_json: broadcast"),
+                    .expect("Transaction::from_json: broadcast as bool"),
             );
             transaction.timestamp = json
                 .get("timestamp")
-                .unwrap()
+                .expect("Transaction::from_json: timestamp")
                 .as_i64()
-                .expect("Transaction::from_json: timestamp");
-            transaction.hash = json.get("hash").unwrap().to_string().replace("\"", "");
+                .expect("Transaction::from_json: timestamp as i64");
+            transaction.hash = json
+                .get("hash")
+                .expect("Transaction::from_json: hash")
+                .to_string()
+                .replace("\"", "");
             transaction
         });
         transaction
@@ -784,7 +798,6 @@ pub struct TransactionPool {
     pub pool: Vec<Transaction>,
 }
 
-// TODO: sync function
 impl TransactionPool {
     /// Constructor
     pub fn new() -> TransactionPool {
@@ -797,6 +810,10 @@ impl TransactionPool {
         if self.pool.contains(transaction) {
             return Err(PoolError::DuplicatedTransaction);
         }
+        match transaction.validate() {
+            Ok(_) => (),
+            Err(_) => return Err(PoolError::InvalidTransaction),
+        }
         self.pool.push(transaction.clone()); // add transaction to pool
         Ok(())
     }
@@ -806,11 +823,72 @@ impl TransactionPool {
         self.pool.clear();
     }
 
-    /// Constructs the pool from vector.
-    pub fn from_vec(vector: &Vec<Transaction>) -> TransactionPool {
-        // create transaction pool from vector
-        let mut pool = Self::new();
-        pool.pool = vector.clone();
-        pool
+    /// Synchronize pool.
+    pub fn sync(&mut self, addr: &str) -> Result<SyncState, Box<dyn Error>> {
+        println!("[+] TRANSACTIONPOOL:SYNC - updating transaction pool");
+
+        // craft request
+        let req = Request {
+            dtype: Dtype::GetTransactionPool,
+            data: "",
+        };
+        // send request
+        let stream = match request(addr, &req) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!(
+                    "[#] TRANSACTIONPOOL:SYNC - request transaction pool error: {}",
+                    e
+                );
+                exit(1);
+            }
+        };
+        // receive data
+        let response: Response<Vec<String>> = match receive(stream) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!(
+                    "[#] TRANSACTIONPOOL:SYNC - receive transaction pool error: {}",
+                    e
+                );
+                exit(1);
+            }
+        };
+        let transactions = response.res;
+        for i in transactions {
+            // parse to json
+            let i: serde_json::Value = match serde_json::Value::from_str(&i) {
+                Ok(n) => n,
+                Err(e) => {
+                    eprintln!(
+                        "[#] TRANSACTIONPOOL:SYNC - parse transaction to json error: {}",
+                        e
+                    );
+                    continue;
+                }
+            };
+            // construct Transaction
+            let transaction = match Transaction::from_json(&i) {
+                Ok(n) => n,
+                Err(e) => {
+                    eprintln!(
+                        "[#] TRANSACTIONPOOL:SYNC - transaction construction error: {:?}",
+                        e
+                    );
+                    continue;
+                }
+            };
+            // add transaction to pool
+            match self.add(&transaction) {
+                Ok(_) => (),
+                Err(e) => {
+                    eprintln!("[#] TRANSACTIONPOOL:SYNC - add transaction error: {:?}", e);
+                    continue;
+                }
+            }
+        }
+        // remove invalid transactions & update transaction pool
+        println!("[+] TRANSACTIONPOOL:SYNC - transactionpool update successful");
+        Ok(SyncState::Fine)
     }
 }

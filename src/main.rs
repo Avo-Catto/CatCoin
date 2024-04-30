@@ -56,81 +56,36 @@ fn main() {
         false => Arc::new(Mutex::new(BlockChain::new())),
     };
 
-    // get blockchain from another node
+    // synchronize blockchain
     if !args.genisis && check_addr(&args.entry) {
         match blockchain.lock().unwrap().sync(&args.entry) {
             Ok(_) => (),
             Err(e) => {
-                eprintln!("[#] BLOCKCHAIN:SYNC - failed check error: {}", e);
+                eprintln!("[#] BLOCKCHAIN:SYNC - synchronization error: {}", e);
                 exit(1);
             }
         }
     // if no entry node specified
     } else if !args.genisis {
-        eprintln!("[#] SYNC - no entry node specified");
+        eprintln!("[#] BLOCKCHAIN:SYNC - no entry node specified");
         exit(1);
     }
 
-    // synchronizing transaction pool
+    // synchronize transaction pool
     if !args.genisis {
-        println!("[+] SYNC - updating transaction pool");
-
-        // craft request
-        let req = Request {
-            dtype: Dtype::GetTransactionPool,
-            data: "",
-        };
-        // send request
-        let stream = match request(&args.entry, &req) {
-            Ok(n) => n,
+        match transactionpool.lock().unwrap().sync(&args.entry) {
+            Ok(_) => (),
             Err(e) => {
-                eprintln!("[#] SYNC - request transaction pool error: {}", e);
+                eprintln!("[#] TRANSACTIONPOOL:SYNC - synchronization error: {}", e);
                 exit(1);
             }
-        };
-        // receive data
-        let response: Response<Vec<serde_json::Value>> = match receive(stream) {
-            Ok(n) => n,
-            Err(e) => {
-                eprintln!("[#] SYNC - receive transaction pool error: {}", e);
-                exit(1);
-            }
-        };
-        let transactions = response.res;
-
-        // update transactions if any
-        if transactions.len() > 0 {
-            // construct transactions from json
-            let mut rcvd_pool: Vec<Transaction> = Vec::new();
-            for i in transactions {
-                // construct Transaction
-                match Transaction::from_json(&i) {
-                    Ok(n) => &rcvd_pool.push(n),
-                    Err(_) => continue,
-                };
-            }
-
-            // validate transactions
-            let mut rm: Vec<Transaction> = Vec::new();
-            for t in &rcvd_pool {
-                match t.validate() {
-                    Ok(_) => continue,
-                    Err(_) => rm.push(t.clone()),
-                }
-            }
-
-            // log
-            if rm.len() > 0 {
-                println!("[!] SYNC - invalid transactions removed: {}", rm.len());
-            }
-
-            // remove invalid transactions & update transaction pool
-            let mut pool = transactionpool.lock().unwrap();
-            *pool = TransactionPool::from_vec(&rcvd_pool);
-            println!("[+] SYNC - update transaction pool successful");
-        } else {
-            println!("[+] SYNC - no update required");
         }
+
+        // DEBUG
+        println!(
+            "DEBUG - transactionpool: {:?}",
+            transactionpool.lock().unwrap().pool
+        );
 
         // update list of peers
         println!("[+] SYNC - updating list of peers");
@@ -461,12 +416,12 @@ fn main() {
                 }
 
                 Dtype::GetTransactionPool => {
-                    let pool: Vec<serde_json::Value> = transactionpool
+                    let pool: Vec<String> = transactionpool
                         .lock()
                         .unwrap()
                         .pool
                         .iter()
-                        .map(|x| x.as_json())
+                        .map(|x| x.as_json().to_string())
                         .collect();
                     respond(&stream, pool);
                 }
@@ -554,7 +509,7 @@ fn main() {
     }
 }
 
-// > TODO: check if lenth variable in blockchain::sync() function updates dynamically
+// > TODO: transactions of the currently mined block aren't synchronized
 // > TODO: make the miner stop completely & start it until blockchain is up to date again
 // > TODO: write sync functions for other parts of node
 // TODO: don't forget to also resync transaction pool
@@ -577,6 +532,7 @@ fn main() {
 // TODO: replace sha256 regex checks with the function to do that
 // TODO: remove everyhthing with //debug comment
 // TODO: cleanup imports
+// TODO: exchange exit(1) code with errors
 // TODO: remove warnings by cargo
 // TODO: real signatures and real wallet addresses
 // TODO: multi signatures
