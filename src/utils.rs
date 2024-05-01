@@ -4,7 +4,10 @@ use chrono::Utc;
 use num_bigint::BigUint;
 use regex::Regex;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 #[derive(Debug)]
 pub enum BlockError {
@@ -35,6 +38,20 @@ impl std::fmt::Display for BlockChainError {
     }
 }
 impl std::error::Error for BlockChainError {}
+
+#[derive(Debug)]
+pub enum SyncError {
+    InvalidValue,
+    Receive,
+    Request,
+}
+
+impl std::fmt::Display for SyncError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+impl std::error::Error for SyncError {}
 
 #[derive(Debug)]
 pub enum PoolError {
@@ -108,7 +125,7 @@ pub fn collect_map(peers: &Vec<String>, dtype: Dtype, data: &str) -> HashMap<Str
 }
 
 /// Returns the target value.
-pub fn get_difficulty(difficulty: u8) -> BigUint {
+pub fn difficulty_from_u8(difficulty: u8) -> BigUint {
     // get hash difficulty
     let pat = "F".repeat(usize::from(difficulty));
     let to = "0".repeat(usize::from(difficulty));
@@ -184,6 +201,101 @@ pub fn subtract_vec<T: PartialEq>(mut x: Vec<T>, y: Vec<T>) -> Vec<T> {
         };
     }
     x
+}
+
+/// Synchronize the difficulty.
+/// Returns `SyncState::Ready` if the synchronization succeeds.
+pub fn sync_difficulty(addr: &str, difficulty: &Arc<Mutex<u8>>) -> Result<SyncState, SyncError> {
+    println!("[+] DIFFICULTY:SYNC - updating difficulty");
+
+    // craft request
+    let req = Request {
+        dtype: Dtype::GetDifficulty,
+        data: "",
+    };
+    // connect to node
+    let stream = match request(addr, &req) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("[#] DIFFICULTY:SYNC - request difficulty error: {}", e);
+            return Err(SyncError::Request);
+        }
+    };
+    // receive difficulty
+    let response: Response<u8> = match receive(stream) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("[#] DIFFICULTY:SYNC - receive difficulty error: {}", e);
+            return Err(SyncError::Receive);
+        }
+    };
+    // check difficulty
+    if response.res < 1 || response.res > 71 {
+        eprintln!("[#] DIFFICULTY:SYNC - invalid difficulty");
+        return Err(SyncError::InvalidValue);
+    }
+    // update difficulty
+    *difficulty.lock().unwrap() = response.res;
+    println!("[+] DIFFICULTY:SYNC - update difficulty successful");
+    Ok(SyncState::Ready)
+}
+
+/// Synchronize the list of peers by requesting peers and broadcasting it's own address.
+/// Returns `SyncState::Ready` if the synchronization succeeds.
+pub fn sync_peers(
+    addr: &str,
+    addr_self: &str,
+    peers: &Arc<Mutex<Vec<String>>>,
+) -> Result<SyncState, SyncError> {
+    println!("[+] PEERS:SYNC - updating list of peers");
+
+    // craft request
+    let req = Request {
+        dtype: Dtype::GetPeers,
+        data: "",
+    };
+    // send request
+    let stream = match request(addr, &req) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("[#] PEERS:SYNC - request list of peers error: {}", e);
+            return Err(SyncError::Request);
+        }
+    };
+    // receive list of peers
+    let response: Response<Vec<String>> = match receive(stream) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("[#] PEERS:SYNC - receive list of peers error: {}", e);
+            return Err(SyncError::Receive);
+        }
+    };
+    let mut peers_rcved = response.res;
+
+    // check peers
+    let mut rm: Vec<String> = Vec::new();
+    for peer in &peers_rcved {
+        if !check_addr(&peer) {
+            rm.push(peer.to_owned());
+        }
+    }
+    // log
+    if rm.len() > 0 {
+        println!("[!] PEERS:SYNC - peers removed: {}", rm.len());
+    }
+    // remove invalid peers
+    peers_rcved = subtract_vec(peers_rcved, rm);
+    peers_rcved.push(addr.to_string()); // add entry node
+
+    // broadcast address to peers
+    println!("[+] PEERS:SYNC - broadcasting address");
+    let (_, rm) = broadcast::<AddPeerResponse>(&peers_rcved, Dtype::AddPeer, &addr_self);
+
+    // remove unreachable peers & update peers
+    let mut peers = peers.lock().unwrap();
+    *peers = subtract_vec(peers_rcved, rm); // update peers
+    println!("[+] PEERS:SYNC - update list of peers successful");
+    Ok(SyncState::Ready)
 }
 
 /// Returns the current timestamp.

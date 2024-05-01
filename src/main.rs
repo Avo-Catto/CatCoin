@@ -70,7 +70,6 @@ fn main() {
         eprintln!("[#] BLOCKCHAIN:SYNC - no entry node specified");
         exit(1);
     }
-
     // synchronize transaction pool
     if !args.genisis {
         match transactionpool.lock().unwrap().sync(&args.entry) {
@@ -80,100 +79,23 @@ fn main() {
                 exit(1);
             }
         }
-
-        // DEBUG
-        println!(
-            "DEBUG - transactionpool: {:?}",
-            transactionpool.lock().unwrap().pool
-        );
-
         // update list of peers
-        println!("[+] SYNC - updating list of peers");
-
-        // craft request
-        let req = Request {
-            dtype: Dtype::GetPeers,
-            data: "",
-        };
-        // send request
-        let stream = match request(&args.entry, &req) {
-            Ok(n) => n,
+        match sync_peers(&args.entry, &addr, &peers) {
+            Ok(_) => (),
             Err(e) => {
-                eprintln!("[#] SYNC - request list of peers error: {}", e);
+                eprintln!("[#] PEERS:SYNC - synchronization error: {}", e);
                 exit(1);
             }
-        };
-        // receive list of peers
-        let response: Response<Vec<String>> = match receive(stream) {
-            Ok(n) => n,
-            Err(e) => {
-                eprintln!("[#] SYNC - receive list of peers error: {}", e);
-                exit(1);
-            }
-        };
-        let mut peers_rcved = response.res;
-
-        // check peers
-        let mut rm: Vec<String> = Vec::new();
-        for peer in &peers_rcved {
-            if !check_addr(&peer) {
-                rm.push(peer.to_owned());
-            }
         }
-        // log
-        if rm.len() > 0 {
-            println!("[!] SYNC - invalid peers removed: {}", rm.len());
-        }
-        // remove invalid peers
-        peers_rcved = subtract_vec(peers_rcved, rm);
-        peers_rcved.push(args.entry.clone()); // add entry node
-
-        // broadcast address to peers
-        println!("[+] SYNC - broadcasting address");
-        let (responses, rm) = broadcast::<AddPeerResponse>(&peers_rcved, Dtype::AddPeer, &addr);
-        println!("DEBUG - AddPeer responses: {:?}", responses); // DEBUG
-
-        // remove unreachable peers & update peers
-        let mut peers = peers.lock().unwrap(); // lock mutex
-        *peers = subtract_vec(peers_rcved, rm); // update peers
-        println!("[+] SYNC - update list of peers successful");
-
         // synchronize difficulty
-        println!("[+] SYNC - updating difficulty");
-
-        // craft request
-        let req = Request {
-            dtype: Dtype::GetDifficulty,
-            data: "",
-        };
-        // connect to node
-        let stream = match request(&args.entry, &req) {
-            Ok(n) => n,
+        match sync_difficulty(&args.entry, &difficulty) {
+            Ok(_) => (),
             Err(e) => {
-                eprintln!("[#] SYNC - request difficulty error: {}", e);
+                eprintln!("[#] DIFFICULTY:SYNC - synchronization error: {}", e);
                 exit(1);
             }
-        };
-        // receive difficulty
-        let response: Response<u8> = match receive(stream) {
-            Ok(n) => n,
-            Err(e) => {
-                eprintln!("[#] SYNC - receive difficulty error: {}", e);
-                exit(1);
-            }
-        };
-        // check difficulty
-        // TODO: check difficulty
-        // update difficulty
-        *difficulty.lock().unwrap() = response.res;
-        println!("[+] SYNC - update difficulty successful");
+        }
     }
-
-    // DEBUG
-    println!(
-        "DEBUG - blockchain: {:?}",
-        blockchain.lock().unwrap().get_chain()
-    );
 
     // log stuff
     println!("[+] SETUP - listening on: {}", addr);
@@ -182,7 +104,7 @@ fn main() {
         blockchain.lock().unwrap().get_latest().unwrap().hash
     );
     println!("[+] MINER - target value: {:?}", {
-        get_difficulty(*difficulty.lock().unwrap())
+        difficulty_from_u8(*difficulty.lock().unwrap())
     });
 
     // construct MineController and start mining
@@ -345,48 +267,54 @@ fn main() {
                     // lock chain & parse index
                     let chain = blockchain.lock().unwrap();
                     let length = chain.get_chain().len();
-                    let idx = {
-                        // if requested latest block
-                        if request.data == "-1" {
-                            length - 1
-                        } else {
-                            // otherwise parse index
-                            match request.data.parse::<usize>() {
-                                Ok(n) => n,
-                                Err(e) => {
-                                    respond(&stream, "");
-                                    eprintln!("[#] DTYPE:GetBlock - parse index error: {}", e);
-                                    return;
+                    if request.data == "-2" {
+                        // currently mined block
+                        let block = mine_controller.current_block.lock().unwrap().clone();
+                        respond(&stream, block.as_json().to_string());
+                    } else {
+                        let idx = {
+                            if request.data == "-1" {
+                                // latest block
+                                length - 1
+                            } else {
+                                // any other block
+                                match request.data.parse::<usize>() {
+                                    Ok(n) => n,
+                                    Err(e) => {
+                                        respond(&stream, "");
+                                        eprintln!("[#] DTYPE:GetBlock - parse index error: {}", e);
+                                        return;
+                                    }
                                 }
                             }
+                        };
+                        // check if index in range
+                        if idx > chain.get_chain().len() - 1 {
+                            respond(&stream, "");
                         }
-                    };
-                    // check if index in range
-                    if idx > chain.get_chain().len() - 1 {
-                        respond(&stream, "");
+                        // get block and respond
+                        match chain.get(idx) {
+                            Some(n) => {
+                                let json = json!({
+                                    "block": n.as_json(),
+                                    "len": length,
+                                });
+                                println!("DEBUG - get block: {}", json.to_string());
+                                respond(&stream, json.to_string());
+                            }
+                            None => respond(&stream, ""),
+                        };
                     }
-                    // get block and respond
-                    match chain.get(idx) {
-                        Some(n) => {
-                            let json = json!({
-                                "block": n.as_json(),
-                                "len": length,
-                            });
-                            println!("DEBUG - get block: {}", json.to_string());
-                            respond(&stream, json.to_string());
-                        }
-                        None => respond(&stream, ""),
-                    };
                 }
 
                 Dtype::GetBlockchain => {
-                    let chain = blockchain.lock().unwrap(); // lock blockchain
+                    let chain = blockchain.lock().unwrap();
                     let blocks: Vec<String> = chain
                         .get_chain()
                         .iter()
-                        .map(|x| x.as_json().to_string())
-                        .collect(); // convert blocks to json
-                    respond(&stream, blocks); // respond blockchain
+                        .map(|x| x.as_json().to_string()) // parse blocks to json
+                        .collect();
+                    respond(&stream, blocks);
                 }
 
                 Dtype::GetDifficulty => {
@@ -464,7 +392,7 @@ fn main() {
                     };
                     {
                         // check hash difficulty
-                        if val > get_difficulty(*difficulty.lock().unwrap()) {
+                        if val > difficulty_from_u8(*difficulty.lock().unwrap()) {
                             respond(&stream, PostBlockResponse::MismatchHashDifficulty);
                             eprintln!("[#] DTYPE:PostBlock - invalid hash difficulty");
                             return;

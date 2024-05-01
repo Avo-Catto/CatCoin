@@ -390,7 +390,7 @@ pub struct MineController {
     run_send: Arc<Mutex<mpsc::Sender<bool>>>,
     run_recv: Arc<Mutex<mpsc::Receiver<bool>>>,
     pub current_block: Arc<Mutex<Block>>,
-    sleep: Arc<Duration>,
+    sleep: Arc<Duration>, // TODO: make it configurable
 }
 
 impl MineController {
@@ -414,6 +414,7 @@ impl MineController {
         }
     }
 
+    // TODO: compile miner
     /// Construct the command to run the miner.
     fn command(start: u64, difficulty: u8, block: Block) -> Result<Child, std::io::Error> {
         // format data

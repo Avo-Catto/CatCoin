@@ -1,4 +1,4 @@
-use cat_coin::{blockchain::Block, utils::get_difficulty};
+use cat_coin::{blockchain::Block, utils::difficulty_from_u8};
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use num_bigint::BigUint;
@@ -24,7 +24,7 @@ fn mine(target_val: BigUint, block: &mut Block, mut start: u64) {
     });
 
     // enter loop
-    let mut val = get_difficulty(0);
+    let mut val = difficulty_from_u8(0);
     while val > target_val {
         // check if skipped
         if check_skip.is_finished() {
@@ -65,7 +65,7 @@ fn main() {
     };
 
     // hash block
-    mine(get_difficulty(json.difficulty), &mut block, json.start);
+    mine(difficulty_from_u8(json.difficulty), &mut block, json.start);
 
     // serialize output
     let json = json!({
