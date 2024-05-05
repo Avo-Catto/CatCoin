@@ -58,7 +58,7 @@ def transaction() -> dict:
     src = str(uuid4())
     dst = str(uuid4())
     timestamp = timestamp_now()
-    val = randint(1, 20)
+    val = 3.2 # randint(1, 20) / 10 + randint(1, 10)
     hash_ = sha256(f'{src}${dst}${timestamp}${val}'.encode()).hexdigest()
     return {
         "src": src,

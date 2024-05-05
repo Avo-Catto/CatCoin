@@ -59,7 +59,11 @@ fn main() {
     // synchronize blockchain
     if !args.genisis && check_addr(&args.entry) {
         match blockchain.lock().unwrap().sync(&args.entry) {
-            Ok(_) => (),
+            Ok(n) => match n {
+                SyncState::Ready => (),
+                SyncState::Running => (),
+                _ => panic!("[#] BLOCKCHAIN:SYNC - synchronization failed: {:?}", n),
+            },
             Err(e) => {
                 eprintln!("[#] BLOCKCHAIN:SYNC - synchronization error: {}", e);
                 exit(1);
@@ -73,7 +77,10 @@ fn main() {
     // synchronize transaction pool
     if !args.genisis {
         match transactionpool.lock().unwrap().sync(&args.entry) {
-            Ok(_) => (),
+            Ok(n) => match n {
+                SyncState::Ready => (),
+                _ => panic!("[#] TRANSACTIONPOOL:SYNC - synchronization failed: {:?}", n),
+            },
             Err(e) => {
                 eprintln!("[#] TRANSACTIONPOOL:SYNC - synchronization error: {}", e);
                 exit(1);
@@ -81,7 +88,10 @@ fn main() {
         }
         // update list of peers
         match sync_peers(&args.entry, &addr, &peers) {
-            Ok(_) => (),
+            Ok(n) => match n {
+                SyncState::Ready => (),
+                _ => panic!("[#] PEERS:SYNC - synchronization failed: {:?}", n),
+            },
             Err(e) => {
                 eprintln!("[#] PEERS:SYNC - synchronization error: {}", e);
                 exit(1);
@@ -89,7 +99,10 @@ fn main() {
         }
         // synchronize difficulty
         match sync_difficulty(&args.entry, &difficulty) {
-            Ok(_) => (),
+            Ok(n) => match n {
+                SyncState::Ready => (),
+                _ => panic!("[#] DIFFICULTY:SYNC - synchronization failed: {:?}", n),
+            },
             Err(e) => {
                 eprintln!("[#] DIFFICULTY:SYNC - synchronization error: {}", e);
                 exit(1);
@@ -97,24 +110,36 @@ fn main() {
         }
     }
 
-    // log stuff
-    println!("[+] SETUP - listening on: {}", addr);
-    println!(
-        "[+] SETUP - genisis hash: {}",
-        blockchain.lock().unwrap().get_latest().unwrap().hash
-    );
-    println!("[+] MINER - target value: {:?}", {
-        difficulty_from_u8(*difficulty.lock().unwrap())
-    });
-
     // construct MineController and start mining
     let mine_controller = Arc::new(MineController::new(
+        &args.entry,
         &blockchain,
         &transactionpool,
         &peers,
         &difficulty,
     ));
-    mine_controller.run();
+    // start mining
+    mine_controller.run(args.genisis);
+
+    {
+        // DEBUG
+        println!(
+            "DEBUG - TransactionPool:\n{}",
+            transactionpool.lock().unwrap()
+        );
+    }
+
+    // log stuff
+    {
+        println!("[+] SETUP - listening on: {}", addr);
+        println!(
+            "[+] SETUP - genisis hash: {}",
+            blockchain.lock().unwrap().get_latest().unwrap().hash
+        );
+        println!("[+] MINER - target value: {:?}", {
+            difficulty_from_u8(*difficulty.lock().unwrap())
+        });
+    }
 
     // create listener
     let listener: TcpListener = TcpListener::bind(addr).unwrap();
@@ -203,15 +228,6 @@ fn main() {
                             return;
                         }
                     };
-                    // check transaction
-                    match transaction.validate() {
-                        Ok(_) => {}
-                        Err(e) => {
-                            respond(&stream, AddTransactionResponse::FailedCheck);
-                            eprintln!("[#] DTYPE:AddTransaction - check failed: {:?}", e);
-                            return;
-                        }
-                    }
                     // broadcast transaction
                     let mut peers = peers.lock().unwrap();
                     if transaction.broadcast {
@@ -222,6 +238,15 @@ fn main() {
                             &transaction.as_json().to_string(),
                         ); // broadcast
                         *peers = subtract_vec(peers.to_vec(), failed); // remove unreachable peers
+                    }
+                    // check transaction
+                    match transaction.validate() {
+                        Ok(_) => {}
+                        Err(e) => {
+                            respond(&stream, AddTransactionResponse::FailedCheck);
+                            eprintln!("[#] DTYPE:AddTransaction - check failed: {:?}", e);
+                            return;
+                        }
                     }
                     // add transaction to pool
                     let mut pool = transactionpool.lock().unwrap();
@@ -240,8 +265,8 @@ fn main() {
                 // TODO: prevent dos attack here
                 // TODO: resync because of reason!?!
                 // TODO: stop miner entirely and start after resync
-                Dtype::CheckBlockchain => {
-                    respond(&stream, CheckBlockchainResponse::Success);
+                Dtype::CheckSync => {
+                    respond(&stream, CheckSyncResponse::OK);
                     let map = collect_map(&peers.lock().unwrap(), Dtype::GetLatestHash, "");
                     let latest_hash = match get_key_by_vec_len(map.clone()) {
                         Some(n) => n,
@@ -420,7 +445,6 @@ fn main() {
                     // add block to chain
                     match blockchain.lock().unwrap().add_block(&block) {
                         Ok(_) => {
-                            mine_controller.skip(); // skip currently mined block
                             println!("[+] DTYPE:PostBlock - add block to chain succeed");
                             respond(&stream, PostBlockResponse::Success);
                         }
@@ -429,6 +453,7 @@ fn main() {
                             respond(&stream, PostBlockResponse::AddToChainError);
                         }
                     }
+                    mine_controller.skip(); // skip currently mined block
                 }
 
                 Dtype::Skip => {}
@@ -437,9 +462,11 @@ fn main() {
     }
 }
 
+// got to block 546!!!
+// > FIXME: the node that broadcasts the transactions isn't putting transactions into its blocks
+//          anymore XD
 // > TODO: transactions of the currently mined block aren't synchronized
 // > TODO: make the miner stop completely & start it until blockchain is up to date again
-// > TODO: write sync functions for other parts of node
 // TODO: don't forget to also resync transaction pool
 // TODO: fix doesn't mine correct block after resync of blockchain
 // TODO: fix resync if received block is invalid, but blockchain is valid, it's resyncing anyway
@@ -447,6 +474,8 @@ fn main() {
 // TODO: make node broadcast transaction even it's invalid
 // TODO: check what happens if multiple nodes receive the same transaction at the same time
 // TODO: how are coins generated? -> smart contract
+// TODO: coinbase transaction
+// TODO: if one thread panics or exits the other one should stop too
 // TODO: check if miner is compiled -> if not then compile it and run the binary instead of cargo
 // TODO: limit amount of transactions (or rather size of blocks)
 // TODO: check if chain is still valid sometimes (every 10 blocks when the time was measured and

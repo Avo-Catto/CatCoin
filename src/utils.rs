@@ -1,4 +1,4 @@
-use crate::blockchain::BlockChain;
+// use crate::blockchain::BlockChain;
 use crate::comm::*;
 use chrono::Utc;
 use num_bigint::BigUint;
@@ -92,6 +92,7 @@ pub fn check_addr(addr: &String) -> bool {
 
 // TODO: write this function
 // Check if node needs to synchronize.
+/*
 pub fn check_sync(peers: &Vec<String>, chain: &BlockChain) -> Result<SyncState, ()> {
     // check blockchain
     let map = collect_map(peers, Dtype::GetBlock, "-1");
@@ -102,6 +103,7 @@ pub fn check_sync(peers: &Vec<String>, chain: &BlockChain) -> Result<SyncState, 
 
     Ok(SyncState::Fine)
 }
+*/
 
 /// Performs a regex check for a SHA256 hash.
 pub fn check_sha256(hash_str: &String) -> bool {

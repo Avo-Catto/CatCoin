@@ -43,13 +43,13 @@ impl std::fmt::Debug for AddTransactionResponse {
 }
 
 #[derive(Deserialize)]
-pub enum CheckBlockchainResponse {
-    Success,
+pub enum CheckSyncResponse {
+    OK,
 }
-impl std::fmt::Debug for CheckBlockchainResponse {
+impl std::fmt::Debug for CheckSyncResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CheckBlockchainResponse::Success => write!(f, "\"Success\""),
+            CheckSyncResponse::OK => write!(f, "\"OK\""),
         }
     }
 }
@@ -92,7 +92,7 @@ pub struct GetBlockReceiver {
 pub enum Dtype {
     AddPeer,
     AddTransaction,
-    CheckBlockchain,
+    CheckSync,
     GetBlock,
     GetBlockchain,
     GetDifficulty,

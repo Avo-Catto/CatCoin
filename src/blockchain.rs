@@ -9,9 +9,9 @@ use std::{
     error::Error,
     io::{BufReader, BufWriter, Read, Write},
     panic::catch_unwind,
-    process::{exit, Child, Command, Stdio},
+    process::{Child, Command, Stdio},
     str::FromStr,
-    sync::{mpsc, Arc, Mutex},
+    sync::{mpsc, Arc, Mutex, TryLockError},
     thread,
     time::Duration,
 };
@@ -256,6 +256,17 @@ impl BlockChain {
         Ok(())
     }
 
+    // TODO: this function doesn't check anything!!!
+    /// Check if blockchain is synchronized.
+    pub fn check(peers: &Vec<String>) -> Result<(SyncState, Vec<String>), SyncError> {
+        let map = collect_map(&peers, Dtype::GetBlock, "-1");
+        let latest_hash = match get_key_by_vec_len(map.clone()) {
+            Some(n) => n,
+            None => return Err(SyncError::InvalidValue),
+        };
+        Ok((SyncState::Fine, map[&latest_hash].clone()))
+    }
+
     /// Updates the chain.
     /// `Note:` The entire chain will be deleted!
     pub fn set_chain(&mut self, chain: Vec<Block>) -> Result<(), Box<dyn Error>> {
@@ -297,6 +308,12 @@ impl BlockChain {
     }
 
     /// Synchronize blockchain by a node.
+    /// Everything is fine if it returns:
+    ///
+    ///     `SyncState::Running`    - it's syncing right now
+    ///     `SyncState::Ready`      - it's done
+    ///
+    /// Everything else is either not returned or is an error.
     pub fn sync(&mut self, addr: &str) -> Result<SyncState, Box<dyn Error>> {
         {
             // check if currently syncing
@@ -328,7 +345,7 @@ impl BlockChain {
                 Ok(n) => n,
                 Err(e) => {
                     eprintln!("[#] BLOCKCHAIN:SYNC - get block error: {}", e);
-                    continue;
+                    return Err(e);
                 }
             };
             // receive data
@@ -336,7 +353,7 @@ impl BlockChain {
                 Ok(n) => n,
                 Err(e) => {
                     eprintln!("[#] BLOCKCHAIN:SYNC - receive block error: {}", e);
-                    continue;
+                    return Err(e);
                 }
             };
             // parse to json
@@ -370,7 +387,7 @@ impl BlockChain {
             // set syncing state
             *self.syncing.lock().unwrap() = SyncState::Ready;
         }
-        Ok(SyncState::Fine)
+        Ok(SyncState::Ready)
     }
 }
 
@@ -383,6 +400,7 @@ struct MineReceiver {
 
 #[derive(Clone)]
 pub struct MineController {
+    sync_addr: Arc<Mutex<String>>,
     blockchain: Arc<Mutex<BlockChain>>,
     transactionpool: Arc<Mutex<TransactionPool>>,
     peers: Arc<Mutex<Vec<String>>>,
@@ -396,13 +414,15 @@ pub struct MineController {
 impl MineController {
     /// Constructor
     pub fn new(
+        sync_addr: &String,
         blockchain: &Arc<Mutex<BlockChain>>,
         transactionpool: &Arc<Mutex<TransactionPool>>,
         peers: &Arc<Mutex<Vec<String>>>,
         difficulty: &Arc<Mutex<u8>>,
-    ) -> MineController {
+    ) -> Self {
         let (send, recv) = mpsc::channel();
         MineController {
+            sync_addr: Arc::new(Mutex::new(sync_addr.to_owned())),
             blockchain: blockchain.clone(),
             transactionpool: transactionpool.clone(),
             peers: peers.clone(),
@@ -431,34 +451,41 @@ impl MineController {
             .spawn()
     }
 
+    // TODO: split some functionality of this function in multiple functions
     /// Run the miner.
-    pub fn run(&self) {
+    pub fn run(&self, genisis: bool) {
+        // synchronize block to mine
+        if !genisis {
+            match self.sync(&self.current_block) {
+                Ok(_) => {
+                    println!("DEBUG - currently mined block synchronized"); // DEBUG
+                }
+                Err(e) => {
+                    panic!("[#] MINECONTROLLER:SYNC - synchronization error: {}", e);
+                }
+            };
+        } else {
+            // otherwise get next block to mine from chain
+            match self.next_block() {
+                Ok(n) => {
+                    if !n {
+                        panic!("[#] MINECONTROLLER - set next block failed");
+                    }
+                }
+                Err(e) => {
+                    panic!("[#] MINECONTROLLER - set next block error: {}", e);
+                }
+            };
+        }
         let self_arc: Arc<MineController> = Arc::new(self.clone());
         thread::spawn(move || {
-            loop {
-                // clone and lock required mutex objects
-                let chain = { self_arc.blockchain.lock().unwrap().clone() };
-                let mut pool = {
-                    let mut lock = self_arc.transactionpool.lock().unwrap();
-                    let tmp = lock.clone();
-                    lock.flush();
-                    tmp
-                };
-                let prev_block = match chain.get_latest() {
-                    Ok(n) => n,
-                    Err(_) => {
-                        eprintln!("[#] MINER - get previous block error");
-                        exit(1);
-                    }
-                };
-                // construct block
-                let mut block =
-                    Block::new(prev_block.index + 1, pool.pool.clone(), prev_block.hash);
-                pool.flush(); // flush pool
-                {
-                    // update current_block property
-                    *self_arc.current_block.lock().unwrap() = block.clone();
-                }
+            let (key, map) = loop {
+                // get block to mine
+                let mut block = { self_arc.current_block.lock().unwrap().clone() };
+
+                // DEBUG
+                println!("DEBUG - currenlty mined block: \n{}", block);
+
                 // set up miner
                 let miner = {
                     let mut rng = thread_rng();
@@ -468,6 +495,7 @@ impl MineController {
                         block.clone(),
                     )
                 };
+
                 // start mining
                 println!("[+] MINER - mining...");
                 match miner {
@@ -483,7 +511,7 @@ impl MineController {
                             thread::spawn(move || match self_arc.run_recv.lock().unwrap().recv() {
                                 Ok(_) => println!("[+] MINER - received skip signal"),
                                 Err(e) => {
-                                    eprintln!("[#] MINER - receive skip signal error: {:?}", e);
+                                    eprintln!("[#] MINER - receive skip signal error: {:?}", e)
                                 }
                             })
                         };
@@ -513,7 +541,7 @@ impl MineController {
                         }
                         // ensure check_skip thread is finished
                         if !check_skip.is_finished() {
-                            self_arc.skip();
+                            self_arc.send_stop();
                         } else {
                             continue;
                         }
@@ -607,8 +635,8 @@ impl MineController {
 
                         // stop mining // TODO: I have to stop the miner in any way and start
                         // mining after the resync
-                        if !self_arc.skip() {
-                            eprintln!("MINER - stop miner error: ?"); // DEBUG
+                        if !self_arc.send_stop() {
+                            eprintln!("[#] MINER - stop miner failed");
                         };
 
                         // collect hashes and find hash where most peers agreed with
@@ -618,6 +646,7 @@ impl MineController {
                             None => continue,
                         };
 
+                        // TODO: it's synchronizing the entire chain... that can be improved
                         // ensure the chain wasn't updated already
                         let latest = {
                             self_arc
@@ -629,33 +658,14 @@ impl MineController {
                                 .clone()
                         };
                         if key == latest.hash {
-                            // TODO: fix that chain resyncs 4 times
                             continue;
+                        } else {
+                            break (key, map);
                         }
-
-                        // resync blockchain // TODO: make it better
-                        for _ in 0..map[&key].len() {
-                            // get random address
-                            let addr = map[&key].choose(&mut thread_rng()).unwrap();
-                            println!("DEBUG - peer to sync from: {}", addr);
-
-                            // resync blockchain
-                            match self_arc.blockchain.lock().unwrap().sync(addr) {
-                                Ok(_) => break,
-                                Err(e) => {
-                                    eprintln!("[#] BLOCKCHAIN:SYNC - failed check error: {}", e);
-                                }
-                            }
-                        }
-                        continue;
                     } else {
                         // request resync of peers of nodes who disagreed
                         println!("[+] MINER - network accepted block");
-                        broadcast::<CheckBlockchainResponse>(
-                            &disagree,
-                            Dtype::CheckBlockchain,
-                            &String::new(),
-                        );
+                        broadcast::<CheckSyncResponse>(&disagree, Dtype::CheckSync, &String::new());
                     }
                 }
                 {
@@ -666,19 +676,229 @@ impl MineController {
                         Err(e) => eprintln!("[#] MINER - adding block error: {:?}", e),
                     }
                 }
+                // next block to mine
+                match self_arc.next_block() {
+                    Ok(n) => {
+                        if !n {
+                            eprintln!("[#] MINER - set next block failed");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[#] MINER - set next block error: {:?}", e);
+                    }
+                }
+            };
+            // FIXME: some sync functions aren't logging by any reason... might explain something?
+            // FIXME: in my eyes, this code isn't executed to synchronize the node :(
+            // sync blockchain // TODO: make it better
+            for _ in 0..map[&key].len() {
+                // get random address
+                let addr = map[&key].choose(&mut thread_rng()).unwrap();
+                println!("DEBUG - peer to sync from: {}", addr); // DEBUG
+
+                // sync blockchain
+                println!(">>>>>>>>>>>>>>>>>>> DEBUG - miner is syncs: BLOCKCHAIN"); // DEBUG
+                match self_arc.blockchain.lock().unwrap().sync(addr) {
+                    Ok(n) => match n {
+                        SyncState::Ready => (),
+                        SyncState::Running => (),
+                        _ => {
+                            eprintln!("[#] BLOCKCHAIN:SYNC - synchronization failed");
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("[#] BLOCKCHAIN:SYNC - failed check error: {}", e);
+                        continue;
+                    }
+                }
+                // sync transactionpool
+                println!(">>>>>>>>>>>>>>>>>>> DEBUG - miner is syncs: TRANSACTIONPOOL"); // DEBUG
+                match self_arc.transactionpool.lock().unwrap().sync(addr) {
+                    Ok(n) => match n {
+                        SyncState::Ready => (),
+                        _ => {
+                            eprintln!("[#] TRANSACTIONPOOL:SYNC - synchronization failed");
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("[#] TRANSACTIONPOOL:SYNC - synchronization error: {}", e);
+                        continue;
+                    }
+                }
+                // sync MineController
+                println!(">>>>>>>>>>>>>>>>>>> DEBUG - miner is syncs: MINECONTROLLER"); // DEBUG
+                match self_arc.sync(&self_arc.current_block) {
+                    Ok(n) => match n {
+                        SyncState::Ready => break,
+                        _ => continue,
+                    },
+                    Err(e) => {
+                        eprintln!("[#] MINECONTROLLER:SYNC - synchronization error: {}", e);
+                    }
+                };
             }
         });
     }
 
-    /// Drop currently mined block and return bool of succeed.
-    pub fn skip(&self) -> bool {
+    /// Set next block to be mined.
+    /// Returns `true` if block was set and `false` if not.
+    fn next_block(&self) -> Result<bool, TryLockError<u8>> {
+        let mut pool = match self.transactionpool.try_lock() {
+            Ok(n) => n,
+            Err(_) => {
+                eprintln!("[#] MINECONTROLLER - acquire transactionpool error");
+                return Err(TryLockError::WouldBlock);
+            }
+        };
+        let chain = match self.blockchain.try_lock() {
+            Ok(n) => n,
+            Err(_) => {
+                eprintln!("[#] MINECONTROLLER - acquire blockchain error");
+                return Err(TryLockError::WouldBlock);
+            }
+        };
+        let prev_block = match chain.get_latest() {
+            Ok(n) => n,
+            Err(_) => {
+                eprintln!("[#] MINECONTROLLER - get previous block error");
+                return Ok(false);
+            }
+        };
+
+        // DEBUG
+        println!("DEBUG - transactionpool:\n{:?}", pool.pool);
+
+        // construct block // TODO: limit amount of transactions
+        let block = Block::new(prev_block.index + 1, pool.pool.clone(), prev_block.hash);
+        pool.flush(); // flush pool
+
+        // update current_block property
+        match self.current_block.try_lock() {
+            Ok(mut n) => *n = block,
+            Err(_) => return Err(TryLockError::WouldBlock),
+        }
+        Ok(true)
+    }
+
+    #[allow(dead_code)]
+    /// Set next block to be mined.
+    /// Returns `true` if block was set and `false` if not.
+    fn try_next_block(&self) -> Result<bool, TryLockError<u8>> {
+        let mut pool = match self.transactionpool.lock() {
+            Ok(n) => n,
+            Err(_) => {
+                eprintln!("[#] MINECONTROLLER - acquire transactionpool error");
+                return Err(TryLockError::WouldBlock);
+            }
+        };
+        let chain = match self.blockchain.lock() {
+            Ok(n) => n,
+            Err(_) => {
+                eprintln!("[#] MINECONTROLLER - acquire blockchain error");
+                return Err(TryLockError::WouldBlock);
+            }
+        };
+        let prev_block = match chain.get_latest() {
+            Ok(n) => n,
+            Err(_) => {
+                eprintln!("[#] MINECONTROLLER - get previous block error");
+                return Ok(false);
+            }
+        };
+
+        // DEBUG
+        println!("DEBUG - transactionpool:\n{:?}", pool.pool);
+
+        // construct block // TODO: limit amount of transactions
+        let block = Block::new(prev_block.index + 1, pool.pool.clone(), prev_block.hash);
+        pool.flush(); // flush pool
+
+        // update current_block property
+        match self.current_block.lock() {
+            Ok(mut n) => *n = block,
+            Err(_) => return Err(TryLockError::WouldBlock),
+        }
+        Ok(true)
+    }
+
+    /// Send the stop signal to the miner.
+    /// Returns bool of success.
+    fn send_stop(&self) -> bool {
         match self.run_send.lock().unwrap().send(true) {
-            Ok(_) => true,
+            Ok(_) => (),
             Err(e) => {
                 eprintln!("[#] MINER - skip current block failed: {:?}", e);
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Drop currently mined block and set next one.
+    /// Returns bool of success.
+    pub fn skip(&self) -> bool {
+        if !self.send_stop() {
+            return false;
+        }
+        match self.next_block() {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[#] MINER - set next block error: {:?}", e);
                 false
             }
         }
+    }
+
+    /// Synchronize the currently mined block.
+    /// Returns `SyncState::Ready` if everything worked fine.
+    fn sync(&self, current_block: &Arc<Mutex<Block>>) -> Result<SyncState, SyncError> {
+        // get address for synchronizing
+        let addr = { self.sync_addr.lock().unwrap().clone() };
+
+        // craft request
+        let req = Request {
+            dtype: Dtype::GetBlock,
+            data: "-2",
+        };
+        // send request
+        let stream = match request(&addr, &req) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[#] MINECONTROLLER:SYNC - get block error: {}", e);
+                return Err(SyncError::Request);
+            }
+        };
+        // receive data
+        let response: Response<String> = match receive(stream) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[#] MINECONTROLLER:SYNC - receive block error: {}", e);
+                return Err(SyncError::Receive);
+            }
+        };
+        // DEBUG
+        println!("DEBUG - MINECONTROLLER:SYNC received: {:?}", response);
+        // parse to json
+        let data = match serde_json::Value::from_str(response.res.as_str()) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[#] MINECONTROLLER:SYNC - parsing to json error: {:?}", e);
+                return Err(SyncError::InvalidValue);
+            }
+        };
+        // construct block
+        let block = match Block::from_json(&data) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[#] MINECONTROLLER:SYNC - parsing block error: {:?}", e);
+                return Err(SyncError::InvalidValue);
+            }
+        };
+        // set block
+        *current_block.lock().unwrap() = block;
+        Ok(SyncState::Ready)
     }
 }
 
@@ -825,7 +1045,12 @@ impl TransactionPool {
     }
 
     /// Synchronize pool.
-    pub fn sync(&mut self, addr: &str) -> Result<SyncState, Box<dyn Error>> {
+    /// Everything is fine if it returns:
+    ///
+    ///     `SyncState::Ready`      - it's done
+    ///
+    /// Everything else is either not returned or is an error.
+    pub fn sync(&mut self, addr: &str) -> Result<SyncState, SyncError> {
         println!("[+] TRANSACTIONPOOL:SYNC - updating transaction pool");
 
         // craft request
@@ -841,7 +1066,7 @@ impl TransactionPool {
                     "[#] TRANSACTIONPOOL:SYNC - request transaction pool error: {}",
                     e
                 );
-                exit(1);
+                return Err(SyncError::Request);
             }
         };
         // receive data
@@ -852,7 +1077,7 @@ impl TransactionPool {
                     "[#] TRANSACTIONPOOL:SYNC - receive transaction pool error: {}",
                     e
                 );
-                exit(1);
+                return Err(SyncError::Receive);
             }
         };
         let transactions = response.res;
@@ -890,6 +1115,17 @@ impl TransactionPool {
         }
         // remove invalid transactions & update transaction pool
         println!("[+] TRANSACTIONPOOL:SYNC - transactionpool update successful");
-        Ok(SyncState::Fine)
+        Ok(SyncState::Ready)
+    }
+}
+
+impl std::fmt::Display for TransactionPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut output = String::new();
+
+        for i in &self.pool {
+            output = format!("{}\n{}", output, i);
+        }
+        write!(f, "{}", output)
     }
 }
