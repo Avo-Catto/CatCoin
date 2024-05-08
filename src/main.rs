@@ -1,5 +1,9 @@
-use cat_coin::{blockchain::*, comm::*, utils::*};
-use clap::Parser;
+use cat_coin::{
+    args::{self, ADDR, ARGS},
+    blockchain::*,
+    comm::*,
+    utils::*,
+};
 use num_bigint::BigUint;
 use rand::{seq::SliceRandom, thread_rng};
 use serde_json::json;
@@ -12,40 +16,11 @@ use std::{
     thread,
 };
 
-#[derive(Parser, Debug)]
-struct Args {
-    /// address of node
-    #[arg(short, long, default_value_t = String::from("127.0.0.1"))]
-    ip: String,
-
-    /// port of node
-    #[arg(short, long, default_value_t = 8000)]
-    port: u16,
-
-    /// create genisis block
-    #[arg(short, long, default_value_t = false)]
-    genisis: bool,
-
-    /// entry node to join the network
-    #[arg(short, long, default_value_t = String::from("127.0.0.1:8000"))]
-    entry: String,
-
-    /// hash difficulty
-    #[arg(short, long, default_value_t = 14)]
-    difficulty: u8,
-}
-
 fn main() {
     // get args
-    let args = Args::parse();
-
-    // check args
-    if args.difficulty < 1 || args.difficulty > 71 {
-        eprintln!("[#] ARGS - invalid difficulty (allowed: 1 - 71)");
-        exit(1);
-    }
-    // format address
-    let addr = format!("{}:{}", args.ip, args.port);
+    args::init();
+    let args = ARGS.get().unwrap().to_owned();
+    let addr = ADDR.get().unwrap().to_string();
 
     // construct mutex objects
     let difficulty = Arc::new(Mutex::new(args.difficulty));
@@ -142,9 +117,10 @@ fn main() {
     }
 
     // create listener
-    let listener: TcpListener = TcpListener::bind(addr).unwrap();
+    let listener: TcpListener = TcpListener::bind(&addr).unwrap();
     for stream in listener.incoming() {
-        // clone mutex instances
+        // clone variables instances
+        let addr = addr.clone();
         let difficulty = Arc::clone(&difficulty);
         let peers = Arc::clone(&peers);
         let transactionpool = Arc::clone(&transactionpool);
@@ -183,6 +159,7 @@ fn main() {
                     Request {
                         dtype: Dtype::Skip,
                         data: String::new(),
+                        addr,
                     }
                 }
             };
@@ -209,6 +186,7 @@ fn main() {
                     }
                 }
 
+                // nodes have received the transaction too
                 Dtype::AddTransaction => {
                     // load data as json
                     let data = match serde_json::Value::from_str(&request.data) {
@@ -228,16 +206,19 @@ fn main() {
                             return;
                         }
                     };
-                    // broadcast transaction
-                    let mut peers = peers.lock().unwrap();
-                    if transaction.broadcast {
-                        transaction.broadcast = false; // disable broadcast
-                        let (_, failed) = broadcast::<AddTransactionResponse>(
-                            &peers,
-                            Dtype::AddTransaction,
-                            &transaction.as_json().to_string(),
-                        ); // broadcast
-                        *peers = subtract_vec(peers.to_vec(), failed); // remove unreachable peers
+                    {
+                        // broadcast peers
+                        let mut peers = peers.lock().unwrap();
+                        if !peers.contains(&request.addr) || transaction.broadcast {
+                            transaction.broadcast = false; // update transaction
+                            let (_, failed) = broadcast::<AddTransactionResponse>(
+                                &peers,
+                                Dtype::AddTransaction,
+                                &transaction.as_json().to_string(),
+                            );
+                            // remove unreachable peers
+                            *peers = subtract_vec(peers.to_vec(), failed);
+                        }
                     }
                     // check transaction
                     match transaction.validate() {
@@ -263,26 +244,104 @@ fn main() {
                 }
 
                 // TODO: prevent dos attack here
-                // TODO: resync because of reason!?!
-                // TODO: stop miner entirely and start after resync
                 Dtype::CheckSync => {
                     respond(&stream, CheckSyncResponse::OK);
-                    let map = collect_map(&peers.lock().unwrap(), Dtype::GetLatestHash, "");
-                    let latest_hash = match get_key_by_vec_len(map.clone()) {
-                        Some(n) => n,
-                        None => return,
-                    };
 
-                    let mut chain = blockchain.lock().unwrap();
-                    if latest_hash != chain.get_latest().unwrap().hash {
-                        loop {
-                            let peer = map[&latest_hash].choose(&mut thread_rng()).unwrap();
-                            match chain.sync(&peer) {
-                                Ok(_) => break,
-                                Err(e) => {
-                                    eprintln!("[#] BLOCKCHAIN:SYNC - failed check error: {}", e);
-                                    continue;
+                    // synchronize node if necessary
+                    let peers = peers.lock().unwrap();
+                    {
+                        // blockchain
+                        let mut chain = blockchain.lock().unwrap();
+                        let (state, peers) = match chain.check(&peers) {
+                            Ok(n) => n,
+                            Err(e) => {
+                                eprintln!("[#] DTYPE:CheckSync - check blockchain error: {:?}", e);
+                                (SyncState::Error, vec![])
+                            }
+                        };
+                        if state != SyncState::Error {
+                            match state {
+                                SyncState::Fine => println!("[+] BLOCKCHAIN - state: fine"),
+                                SyncState::Needed => {
+                                    // sync blockchain
+                                    match chain.sync(peers.choose(&mut thread_rng())
+                                        .expect("[#] DTYPE:CheckSync - random peer for blockchain sync error")) {
+                                        Ok(n) => match n {
+                                            SyncState::Ready => (),
+                                            SyncState::Running => (),
+                                            _ => panic!("[#] BLOCKCHAIN:SYNC - synchronization failed: {:?}", n),
+                                        },
+                                        Err(e) => eprintln!("[#] BLOCKCHAIN:SYNC - synchronization error: {}", e),
+                                    };
                                 }
+                                _ => (),
+                            }
+                        }
+                    }
+                    {
+                        // transactionpool
+                        let mut pool = transactionpool.lock().unwrap();
+                        let (state, peers) = match pool.check(&peers) {
+                            Ok(n) => n,
+                            Err(e) => {
+                                eprintln!(
+                                    "[#] DTYPE:CheckSync - check transactionpool error: {:?}",
+                                    e
+                                );
+                                (SyncState::Error, vec![])
+                            }
+                        };
+                        if state != SyncState::Error {
+                            match state {
+                                SyncState::Fine => println!("[+] TRANSACTIONPOOL - state: fine"),
+                                SyncState::Needed => {
+                                    // sync transactionpool
+                                    match pool.sync(peers.choose(&mut thread_rng())
+                                        .expect("[#] DTYPE:CheckSync - random peer for transactionpool sync error")) {
+                                        Ok(n) => match n {
+                                            SyncState::Ready => (),
+                                            _ => panic!("[#] TRANSACTIONPOOL:SYNC - synchronization failed: {:?}", n),
+                                        },
+                                        Err(e) => eprintln!("[#] TRANSACTIONPOOL:SYNC - synchronization error: {}", e),
+                                    };
+                                }
+                                _ => (),
+                            }
+                        }
+                    }
+                    {
+                        // minecontroller
+                        let (state, peers) = match mine_controller.check(&peers) {
+                            Ok(n) => n,
+                            Err(e) => {
+                                eprintln!(
+                                    "[#] DTYPE:CheckSync - check minecontroller error: {:?}",
+                                    e
+                                );
+                                (SyncState::Error, vec![])
+                            }
+                        };
+                        if state != SyncState::Error {
+                            match state {
+                                SyncState::Fine => println!("[+] MINECONTROLLER - state: fine"),
+                                SyncState::Needed => {
+                                    // set sync address
+                                    *mine_controller.sync_addr.lock().unwrap() = peers
+                                        .choose(&mut thread_rng())
+                                        .expect(
+                                            "[#] DTYPE:CheckSync - random peer for minecontroller sync error",
+                                        )
+                                        .to_string();
+                                    // sync minecontroller
+                                    match mine_controller.sync(&mine_controller.current_block) {
+                                        Ok(n) => match n {
+                                            SyncState::Ready => (),
+                                            _ => panic!("[#] MINECONTROLLER:SYNC - synchronization failed: {:?}", n),
+                                        },
+                                        Err(e) => eprintln!("[#] MINECONTROLLER:SYNC - synchronization error: {}", e),
+                                    };
+                                }
+                                _ => (),
                             }
                         }
                     }
@@ -462,45 +521,30 @@ fn main() {
     }
 }
 
-// got to block 546!!!
-// > FIXME: the node that broadcasts the transactions isn't putting transactions into its blocks
-//          anymore XD
-// > TODO: transactions of the currently mined block aren't synchronized
-// > TODO: make the miner stop completely & start it until blockchain is up to date again
-// TODO: don't forget to also resync transaction pool
-// TODO: fix doesn't mine correct block after resync of blockchain
-// TODO: fix resync if received block is invalid, but blockchain is valid, it's resyncing anyway
-// TODO: make the node only resyncing until it's valid again
-// TODO: make node broadcast transaction even it's invalid
-// TODO: check what happens if multiple nodes receive the same transaction at the same time
-// TODO: how are coins generated? -> smart contract
-// TODO: coinbase transaction
-// TODO: if one thread panics or exits the other one should stop too
-// TODO: check if miner is compiled -> if not then compile it and run the binary instead of cargo
+// > TODO: other todos
 // TODO: limit amount of transactions (or rather size of blocks)
-// TODO: check if chain is still valid sometimes (every 10 blocks when the time was measured and
-//       the difficulty was adjusted)
-// TODO: make difficulty adjustable (maybe by amount of miners)
-// TODO: replace str method of blockchain related object with fmt::Display
+// TODO: make the node only resyncing until it's valid again
+// TODO: store the blockchain in a file or maybe multiple files
+// TODO: coinbase transaction - generate coins
+// TODO: make difficulty automatically adjustable (maybe by amount of miners)
 // TODO: add pool feature where nodes have ID's to mine more efficiently
 // TODO: add Docs to functions
-// TODO: improve returning errors by using Result<val, Error> instead of Result<val, ()>
-// TODO: improve logging
-// TODO: replace sha256 regex checks with the function to do that
-// TODO: remove everyhthing with //debug comment
-// TODO: cleanup imports
-// TODO: exchange exit(1) code with errors
-// TODO: remove warnings by cargo
+// TODO: improve logging -> write a logger
 // TODO: real signatures and real wallet addresses
 // TODO: multi signatures
-// TODO: block reward
 // TODO: blurring for anonymity
-// Resource: https://medium.com/learning-lab/how-cryptocurrencies-work-technical-guide-95950c002b8f
+// TODO: web server + website for hot wallet
 //
 // TODO: in far future:
-// - the miner should be run as release? (so the command might not be optimal)
+// - check if miner is compiled -> if not then compile it and run the binary instead of cargo
+// - remove debug print statements
 //
 // TODO: Optional:
+// - if one thread panics or exits the other one should stop too
 // - encrypt traffic between nodes?
-// - save blockchain to continue later?
 // - full and half nodes..?
+//
+// TODO: configs that should be available:
+// - amount of transactions
+// - sleep time between reading stdout / stdin of miner
+// - time that should be aimed for every block

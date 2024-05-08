@@ -1,3 +1,5 @@
+use crate::args::ADDR;
+use rand::{seq::SliceRandom, thread_rng};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
@@ -22,7 +24,7 @@ impl std::fmt::Debug for AddPeerResponse {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, PartialEq)]
 pub enum AddTransactionResponse {
     ConstructionError,
     DuplicatedTransaction,
@@ -114,6 +116,7 @@ pub struct Response<T> {
 pub struct Request<T> {
     pub dtype: Dtype,
     pub data: T,
+    pub addr: String,
 }
 
 #[derive(Deserialize)]
@@ -133,13 +136,18 @@ where
 {
     let mut peers_failed: Vec<String> = Vec::new();
     let mut responses = Vec::new();
+    let mut peers = peers.clone();
+    peers.shuffle(&mut thread_rng());
 
     // craft request
-    let req = Request { dtype, data };
-    println!("DEBG - broadcast send: {:?}", req); // DEBUG
+    let req = Request {
+        dtype,
+        data,
+        addr: ADDR.get().unwrap().to_string(),
+    };
+    // send request
     for peer in peers {
-        // send request
-        let stream = match request(peer, &req) {
+        let stream = match request(&peer, &req) {
             Ok(n) => n,
             Err(_) => {
                 peers_failed.push(peer.clone());
@@ -211,7 +219,7 @@ where
         Err(e) => return Err(Box::new(e)),
     };
     // send request
-    let json = json!({"dtype": req.dtype, "data": req.data});
+    let json = json!({"dtype": req.dtype, "data": req.data, "addr": req.addr});
     match stream.write_all(json.to_string().as_bytes()) {
         Ok(n) => n,
         Err(e) => return Err(Box::new(e)),

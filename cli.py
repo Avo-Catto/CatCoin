@@ -7,6 +7,8 @@ from datetime import datetime
 from hashlib import sha256
 from time import sleep
 
+FAKE_ADDR = "127.0.0.1:9090"
+ADDRESS = "127.0.0.1:8000"
 
 def get_difficulty(d:int) -> int: 
     return int(
@@ -58,14 +60,15 @@ def transaction() -> dict:
     src = str(uuid4())
     dst = str(uuid4())
     timestamp = timestamp_now()
-    val = 3.2 # randint(1, 20) / 10 + randint(1, 10)
+    val = randint(1, 20) / 10 + randint(1, 10)
     hash_ = sha256(f'{src}${dst}${timestamp}${val}'.encode()).hexdigest()
     return {
         "src": src,
         "dst": dst,
         "timestamp": timestamp,
         "val": val,
-        "broadcast": True,
+        "broadcast": False, 
+        # "broadcast": True,
         "hash": hash_
     }
 
@@ -85,10 +88,10 @@ def block(idx: int, prev_hash: str, transactions: list) -> dict:
     }
 
 
-def send(dtype: str, data, addr:tuple) -> str:
+def send(dtype: str, data, addr:tuple, addr_self:str = "127.0.0.1:9090") -> str:
     """Send message."""
     with create_connection(addr) as con:
-        con.send(dumps({"dtype": dtype, "data": str(data).replace("'", "\"").replace("True", "true").replace("False", "false")}).encode())
+        con.send(dumps({"dtype": dtype, "data": str(data).replace("'", "\"").replace("True", "true").replace("False", "false"), "addr": addr_self}).encode())
         con.shutdown(SHUT_WR)
         res = con.recv(4096).decode()
         # res = loads(res)

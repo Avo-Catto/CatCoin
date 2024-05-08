@@ -1,5 +1,5 @@
 // use crate::blockchain::BlockChain;
-use crate::comm::*;
+use crate::{args::ADDR, comm::*};
 use chrono::Utc;
 use num_bigint::BigUint;
 use regex::Regex;
@@ -65,8 +65,9 @@ impl std::fmt::Display for PoolError {
 }
 impl std::error::Error for PoolError {}
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum SyncState {
+    Error,
     Fine,
     Needed,
     Ready,
@@ -89,21 +90,6 @@ pub fn check_addr(addr: &String) -> bool {
     ).unwrap();
     addr_re.is_match(addr)
 }
-
-// TODO: write this function
-// Check if node needs to synchronize.
-/*
-pub fn check_sync(peers: &Vec<String>, chain: &BlockChain) -> Result<SyncState, ()> {
-    // check blockchain
-    let map = collect_map(peers, Dtype::GetBlock, "-1");
-    let latest_hash = match get_key_by_vec_len(map.clone()) {
-        Some(n) => n,
-        None => return Err(()),
-    };
-
-    Ok(SyncState::Fine)
-}
-*/
 
 /// Performs a regex check for a SHA256 hash.
 pub fn check_sha256(hash_str: &String) -> bool {
@@ -214,6 +200,7 @@ pub fn sync_difficulty(addr: &str, difficulty: &Arc<Mutex<u8>>) -> Result<SyncSt
     let req = Request {
         dtype: Dtype::GetDifficulty,
         data: "",
+        addr: ADDR.get().unwrap().to_string(),
     };
     // connect to node
     let stream = match request(addr, &req) {
@@ -255,6 +242,7 @@ pub fn sync_peers(
     let req = Request {
         dtype: Dtype::GetPeers,
         data: "",
+        addr: addr_self.to_string(),
     };
     // send request
     let stream = match request(addr, &req) {

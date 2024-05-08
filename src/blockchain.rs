@@ -1,4 +1,4 @@
-use crate::{comm::*, utils::*};
+use crate::{args::ADDR, comm::*, utils::*};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rand::{seq::SliceRandom, thread_rng, Rng};
 use regex::Regex;
@@ -256,34 +256,32 @@ impl BlockChain {
         Ok(())
     }
 
-    // TODO: this function doesn't check anything!!!
     /// Check if blockchain is synchronized.
-    pub fn check(peers: &Vec<String>) -> Result<(SyncState, Vec<String>), SyncError> {
+    /// Only returns `SyncState::Fine` with an empty list of peers and `SyncState::Needed` with the
+    /// corresponding peers.
+    pub fn check(&self, peers: &Vec<String>) -> Result<(SyncState, Vec<String>), SyncError> {
+        // map latest blocks of the network
         let map = collect_map(&peers, Dtype::GetBlock, "-1");
-        let latest_hash = match get_key_by_vec_len(map.clone()) {
+
+        // get hash of latest block that most nodes share
+        let hash_network = match get_key_by_vec_len(map.clone()) {
             Some(n) => n,
             None => return Err(SyncError::InvalidValue),
         };
-        Ok((SyncState::Fine, map[&latest_hash].clone()))
-    }
-
-    /// Updates the chain.
-    /// `Note:` The entire chain will be deleted!
-    pub fn set_chain(&mut self, chain: Vec<Block>) -> Result<(), Box<dyn Error>> {
-        self.chain.clear();
-        for block in &chain {
-            // check block
-            match block.validate() {
-                Ok(_) => (),
-                Err(e) => return Err(Box::new(e)),
+        // get hash of latest block of local chain
+        let hash_local = match self.get_latest() {
+            Ok(n) => n.hash,
+            Err(_) => {
+                eprintln!("[#] BLOCKCHAIN - check sync get latest block failed");
+                return Err(SyncError::InvalidValue);
             }
-            // add to chain
-            match self.add_block(block) {
-                Ok(_) => (),
-                Err(e) => return Err(Box::new(e)),
-            }
+        };
+        // check equality of hash
+        if hash_local == hash_network {
+            Ok((SyncState::Fine, vec![]))
+        } else {
+            Ok((SyncState::Needed, map[&hash_network].clone()))
         }
-        Ok(())
     }
 
     /// Return block by index.
@@ -307,6 +305,7 @@ impl BlockChain {
         }
     }
 
+    // TODO: make it only resync the blocks until the chain was correct
     /// Synchronize blockchain by a node.
     /// Everything is fine if it returns:
     ///
@@ -333,13 +332,16 @@ impl BlockChain {
         let mut length: u64 = 2;
         let mut idx: u64 = 0;
 
-        // TODO: I can just length - 1 for testing purpose
         while idx < length {
             // craft request
             let req = Request {
                 dtype: Dtype::GetBlock,
                 data: idx.to_string(),
+                addr: ADDR.get().unwrap().to_string(),
             };
+
+            println!("DEBUG - Request: {:?}", req); // DEBUG
+
             // send request
             let stream = match request(addr, &req) {
                 Ok(n) => n,
@@ -400,7 +402,7 @@ struct MineReceiver {
 
 #[derive(Clone)]
 pub struct MineController {
-    sync_addr: Arc<Mutex<String>>,
+    pub sync_addr: Arc<Mutex<String>>,
     blockchain: Arc<Mutex<BlockChain>>,
     transactionpool: Arc<Mutex<TransactionPool>>,
     peers: Arc<Mutex<Vec<String>>>,
@@ -414,7 +416,7 @@ pub struct MineController {
 impl MineController {
     /// Constructor
     pub fn new(
-        sync_addr: &String,
+        sync_addr: &str,
         blockchain: &Arc<Mutex<BlockChain>>,
         transactionpool: &Arc<Mutex<TransactionPool>>,
         peers: &Arc<Mutex<Vec<String>>>,
@@ -422,7 +424,7 @@ impl MineController {
     ) -> Self {
         let (send, recv) = mpsc::channel();
         MineController {
-            sync_addr: Arc::new(Mutex::new(sync_addr.to_owned())),
+            sync_addr: Arc::new(Mutex::new(sync_addr.to_string())),
             blockchain: blockchain.clone(),
             transactionpool: transactionpool.clone(),
             peers: peers.clone(),
@@ -431,6 +433,29 @@ impl MineController {
             run_recv: Arc::new(Mutex::new(recv)),
             current_block: Arc::new(Mutex::new(Block::default())),
             sleep: Arc::new(Duration::from_millis(500)),
+        }
+    }
+
+    /// Check if currently mined block is synchronized.
+    /// Only returns `SyncState::Fine` with an empty list of peers and `SyncState::Needed` with the
+    /// corresponding peers.
+    pub fn check(&self, peers: &Vec<String>) -> Result<(SyncState, Vec<String>), SyncError> {
+        // map currently mined blocks of the network
+        let map = collect_map(&peers, Dtype::GetBlock, "-2");
+
+        // get hash of latest block that most nodes share
+        let hash_network = match get_key_by_vec_len(map.clone()) {
+            Some(n) => n,
+            None => return Err(SyncError::InvalidValue),
+        };
+        // get hash of latest block of local chain
+        let hash_local = { self.current_block.lock().unwrap().hash.clone() };
+
+        // check equality of hash
+        if hash_local == hash_network {
+            Ok((SyncState::Fine, vec![]))
+        } else {
+            Ok((SyncState::Needed, map[&hash_network].clone()))
         }
     }
 
@@ -449,297 +474,6 @@ impl MineController {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
-    }
-
-    // TODO: split some functionality of this function in multiple functions
-    /// Run the miner.
-    pub fn run(&self, genisis: bool) {
-        // synchronize block to mine
-        if !genisis {
-            match self.sync(&self.current_block) {
-                Ok(_) => {
-                    println!("DEBUG - currently mined block synchronized"); // DEBUG
-                }
-                Err(e) => {
-                    panic!("[#] MINECONTROLLER:SYNC - synchronization error: {}", e);
-                }
-            };
-        } else {
-            // otherwise get next block to mine from chain
-            match self.next_block() {
-                Ok(n) => {
-                    if !n {
-                        panic!("[#] MINECONTROLLER - set next block failed");
-                    }
-                }
-                Err(e) => {
-                    panic!("[#] MINECONTROLLER - set next block error: {}", e);
-                }
-            };
-        }
-        let self_arc: Arc<MineController> = Arc::new(self.clone());
-        thread::spawn(move || {
-            let (key, map) = loop {
-                // get block to mine
-                let mut block = { self_arc.current_block.lock().unwrap().clone() };
-
-                // DEBUG
-                println!("DEBUG - currenlty mined block: \n{}", block);
-
-                // set up miner
-                let miner = {
-                    let mut rng = thread_rng();
-                    MineController::command(
-                        rng.gen(), // random number
-                        *self_arc.difficulty.lock().unwrap(),
-                        block.clone(),
-                    )
-                };
-
-                // start mining
-                println!("[+] MINER - mining...");
-                match miner {
-                    Ok(mut child) => {
-                        // IO of child process
-                        let stdout =
-                            Arc::new(Mutex::new(BufReader::new(child.stdout.take().unwrap())));
-                        let mut stdin = BufWriter::new(child.stdin.take().unwrap());
-
-                        // check for skip signal
-                        let check_skip = {
-                            let self_arc = Arc::clone(&self_arc);
-                            thread::spawn(move || match self_arc.run_recv.lock().unwrap().recv() {
-                                Ok(_) => println!("[+] MINER - received skip signal"),
-                                Err(e) => {
-                                    eprintln!("[#] MINER - receive skip signal error: {:?}", e)
-                                }
-                            })
-                        };
-                        // read thread
-                        let read = {
-                            let stdout = Arc::clone(&stdout);
-                            thread::spawn(move || {
-                                let mut buf = String::new();
-                                let _ = stdout.lock().unwrap().read_to_string(&mut buf);
-                                buf
-                            })
-                        };
-                        // while mining
-                        while !read.is_finished() {
-                            if check_skip.is_finished() {
-                                match stdin.write_all("stop\n".as_bytes()) {
-                                    Ok(_) => {
-                                        println!("[+] MINER - move on to next block");
-                                        break;
-                                    }
-                                    Err(e) => {
-                                        eprintln!("[#] MINER - child process stdin error: {}", e);
-                                    }
-                                }
-                            }
-                            thread::sleep(*self_arc.sleep);
-                        }
-                        // ensure check_skip thread is finished
-                        if !check_skip.is_finished() {
-                            self_arc.send_stop();
-                        } else {
-                            continue;
-                        }
-                        // decode base64
-                        let buf = read.join().unwrap();
-                        let decoded = match STANDARD.decode(buf.as_bytes()) {
-                            Ok(n) => n,
-                            Err(e) => {
-                                eprintln!("[#] MINER - decode base64 error: {}", e);
-                                return;
-                            }
-                        };
-                        // convert u8 vector to string
-                        let json_string = match String::from_utf8(decoded) {
-                            Ok(n) => n,
-                            Err(e) => {
-                                eprintln!("[#] MINER - convert utf8 error: {}", e);
-                                return;
-                            }
-                        };
-                        // parse string to json
-                        let json: MineReceiver = match serde_json::from_str(&json_string) {
-                            Ok(n) => n,
-                            Err(e) => {
-                                eprintln!("[#] MINER - parse json error: {}", e);
-                                return;
-                            }
-                        };
-                        // update block
-                        block.nonce = json.nonce;
-                        block.hash = json.hash;
-                        block.merkle = json.merkle;
-                    }
-                    Err(e) => {
-                        eprintln!("[#] MINER - error: {}", e);
-                        return;
-                    }
-                }
-                // validate block
-                match block.validate() {
-                    Ok(_) => println!("[+] MINER - nonce found: {}", block.nonce),
-                    Err(e) => {
-                        eprintln!("[#] MINER - block invalid: {:?}", e);
-                        return;
-                    }
-                }
-                {
-                    // TODO: it blocks the mining process I guess
-                    // broadcast block & update peers
-                    let responses: Vec<Response<PostBlockResponse>>;
-                    let failed: Vec<String>;
-
-                    let (peers, responses) = {
-                        println!("DEBUG - checking responses of nodes!"); // debug
-                        let mut peers = self_arc.peers.lock().unwrap(); // lock peers
-
-                        // broadcast block
-                        (responses, failed) = broadcast::<PostBlockResponse>(
-                            &peers,
-                            Dtype::PostBlock,
-                            &block.as_json().to_string(),
-                        );
-                        *peers = subtract_vec(peers.to_vec(), failed); // update peers
-                        (peers, responses) // return peers
-                    };
-
-                    // declare variables for check
-                    let mut agree: Vec<String> = Vec::new();
-                    let mut disagree: Vec<String> = Vec::new();
-
-                    // DEBUG
-                    println!("DEBUG - peers: {:?}", peers);
-                    println!("DEBUG - responses: {:?}", responses);
-
-                    // deserialize responses
-                    for res in responses {
-                        if res.res == PostBlockResponse::Success {
-                            agree.push(res.addr);
-                        } else {
-                            disagree.push(res.addr);
-                        }
-                    }
-
-                    // DEBUG
-                    println!("DEBUG - agree: {:?}", agree);
-                    println!("DEBUG - disagree: {:?}", disagree);
-
-                    // compare responses
-                    if disagree.len() > (agree.len() + disagree.len()) / 2 {
-                        println!("DEBUG - more than 50% of the nodes disagreed with the block"); // DEBUG
-
-                        // stop mining // TODO: I have to stop the miner in any way and start
-                        // mining after the resync
-                        if !self_arc.send_stop() {
-                            eprintln!("[#] MINER - stop miner failed");
-                        };
-
-                        // collect hashes and find hash where most peers agreed with
-                        let map = collect_map(&peers, Dtype::GetLatestHash, "");
-                        let key = match get_key_by_vec_len(map.clone()) {
-                            Some(n) => n,
-                            None => continue,
-                        };
-
-                        // TODO: it's synchronizing the entire chain... that can be improved
-                        // ensure the chain wasn't updated already
-                        let latest = {
-                            self_arc
-                                .blockchain
-                                .lock()
-                                .unwrap()
-                                .get_latest()
-                                .unwrap()
-                                .clone()
-                        };
-                        if key == latest.hash {
-                            continue;
-                        } else {
-                            break (key, map);
-                        }
-                    } else {
-                        // request resync of peers of nodes who disagreed
-                        println!("[+] MINER - network accepted block");
-                        broadcast::<CheckSyncResponse>(&disagree, Dtype::CheckSync, &String::new());
-                    }
-                }
-                {
-                    // append block to chain
-                    let mut chain = self_arc.blockchain.lock().unwrap();
-                    match chain.add_block(&block) {
-                        Ok(_) => println!("[+] MINER - block added:\n\n{}", block),
-                        Err(e) => eprintln!("[#] MINER - adding block error: {:?}", e),
-                    }
-                }
-                // next block to mine
-                match self_arc.next_block() {
-                    Ok(n) => {
-                        if !n {
-                            eprintln!("[#] MINER - set next block failed");
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("[#] MINER - set next block error: {:?}", e);
-                    }
-                }
-            };
-            // FIXME: some sync functions aren't logging by any reason... might explain something?
-            // FIXME: in my eyes, this code isn't executed to synchronize the node :(
-            // sync blockchain // TODO: make it better
-            for _ in 0..map[&key].len() {
-                // get random address
-                let addr = map[&key].choose(&mut thread_rng()).unwrap();
-                println!("DEBUG - peer to sync from: {}", addr); // DEBUG
-
-                // sync blockchain
-                println!(">>>>>>>>>>>>>>>>>>> DEBUG - miner is syncs: BLOCKCHAIN"); // DEBUG
-                match self_arc.blockchain.lock().unwrap().sync(addr) {
-                    Ok(n) => match n {
-                        SyncState::Ready => (),
-                        SyncState::Running => (),
-                        _ => {
-                            eprintln!("[#] BLOCKCHAIN:SYNC - synchronization failed");
-                            continue;
-                        }
-                    },
-                    Err(e) => {
-                        eprintln!("[#] BLOCKCHAIN:SYNC - failed check error: {}", e);
-                        continue;
-                    }
-                }
-                // sync transactionpool
-                println!(">>>>>>>>>>>>>>>>>>> DEBUG - miner is syncs: TRANSACTIONPOOL"); // DEBUG
-                match self_arc.transactionpool.lock().unwrap().sync(addr) {
-                    Ok(n) => match n {
-                        SyncState::Ready => (),
-                        _ => {
-                            eprintln!("[#] TRANSACTIONPOOL:SYNC - synchronization failed");
-                            continue;
-                        }
-                    },
-                    Err(e) => {
-                        eprintln!("[#] TRANSACTIONPOOL:SYNC - synchronization error: {}", e);
-                        continue;
-                    }
-                }
-                // sync MineController
-                println!(">>>>>>>>>>>>>>>>>>> DEBUG - miner is syncs: MINECONTROLLER"); // DEBUG
-                match self_arc.sync(&self_arc.current_block) {
-                    Ok(n) => match n {
-                        SyncState::Ready => break,
-                        _ => continue,
-                    },
-                    Err(e) => {
-                        eprintln!("[#] MINECONTROLLER:SYNC - synchronization error: {}", e);
-                    }
-                };
-            }
-        });
     }
 
     /// Set next block to be mined.
@@ -823,6 +557,321 @@ impl MineController {
         Ok(true)
     }
 
+    // TODO: split some functionality of this function in multiple functions
+    /// Run the miner.
+    pub fn run(&self, genisis: bool) {
+        // synchronize block to mine
+        if !genisis {
+            match self.sync(&self.current_block) {
+                Ok(_) => {
+                    println!("DEBUG - currently mined block synchronized"); // DEBUG
+                }
+                Err(e) => {
+                    panic!("[#] MINECONTROLLER:SYNC - synchronization error: {}", e);
+                }
+            };
+        } else {
+            // otherwise get next block to mine from chain
+            match self.next_block() {
+                Ok(n) => {
+                    if !n {
+                        panic!("[#] MINECONTROLLER - set next block failed");
+                    }
+                }
+                Err(e) => {
+                    panic!("[#] MINECONTROLLER - set next block error: {}", e);
+                }
+            };
+        }
+        let self_arc: Arc<MineController> = Arc::new(self.clone());
+        thread::spawn(move || {
+            loop {
+                loop {
+                    // get block to mine
+                    let mut block = { self_arc.current_block.lock().unwrap().clone() };
+
+                    // DEBUG
+                    println!("DEBUG - currenlty mined block: \n{}", block);
+
+                    // set up miner
+                    let miner = {
+                        let mut rng = thread_rng();
+                        MineController::command(
+                            rng.gen(), // random number
+                            *self_arc.difficulty.lock().unwrap(),
+                            block.clone(),
+                        )
+                    };
+
+                    // start mining
+                    println!("[+] MINER - mining...");
+                    match miner {
+                        Ok(mut child) => {
+                            // IO of child process
+                            let stdout =
+                                Arc::new(Mutex::new(BufReader::new(child.stdout.take().unwrap())));
+                            let mut stdin = BufWriter::new(child.stdin.take().unwrap());
+
+                            // check for skip signal
+                            let check_skip = {
+                                let self_arc = Arc::clone(&self_arc);
+                                thread::spawn(move || {
+                                    match self_arc.run_recv.lock().unwrap().recv() {
+                                        Ok(_) => println!("[+] MINER - received skip signal"),
+                                        Err(e) => {
+                                            eprintln!(
+                                                "[#] MINER - receive skip signal error: {:?}",
+                                                e
+                                            )
+                                        }
+                                    }
+                                })
+                            };
+                            // read thread
+                            let read = {
+                                let stdout = Arc::clone(&stdout);
+                                thread::spawn(move || {
+                                    let mut buf = String::new();
+                                    let _ = stdout.lock().unwrap().read_to_string(&mut buf);
+                                    buf
+                                })
+                            };
+                            // while mining
+                            while !read.is_finished() {
+                                if check_skip.is_finished() {
+                                    match stdin.write_all("stop\n".as_bytes()) {
+                                        Ok(_) => {
+                                            println!("[+] MINER - move on to next block");
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "[#] MINER - child process stdin error: {}",
+                                                e
+                                            );
+                                        }
+                                    }
+                                }
+                                thread::sleep(*self_arc.sleep);
+                            }
+                            // ensure check_skip thread is finished
+                            if !check_skip.is_finished() {
+                                self_arc.send_stop();
+                            } else {
+                                continue;
+                            }
+                            // decode base64
+                            let buf = read.join().unwrap();
+                            let decoded = match STANDARD.decode(buf.as_bytes()) {
+                                Ok(n) => n,
+                                Err(e) => {
+                                    eprintln!("[#] MINER - decode base64 error: {}", e);
+                                    return;
+                                }
+                            };
+                            // convert u8 vector to string
+                            let json_string = match String::from_utf8(decoded) {
+                                Ok(n) => n,
+                                Err(e) => {
+                                    eprintln!("[#] MINER - convert utf8 error: {}", e);
+                                    return;
+                                }
+                            };
+                            // parse string to json
+                            let json: MineReceiver = match serde_json::from_str(&json_string) {
+                                Ok(n) => n,
+                                Err(e) => {
+                                    eprintln!("[#] MINER - parse json error: {}", e);
+                                    return;
+                                }
+                            };
+                            // update block
+                            block.nonce = json.nonce;
+                            block.hash = json.hash;
+                            block.merkle = json.merkle;
+                        }
+                        Err(e) => {
+                            eprintln!("[#] MINER - error: {}", e);
+                            return;
+                        }
+                    }
+                    // validate block
+                    match block.validate() {
+                        Ok(_) => println!("[+] MINER - nonce found: {}", block.nonce),
+                        Err(e) => {
+                            eprintln!("[#] MINER - block invalid: {:?}", e);
+                            return;
+                        }
+                    }
+                    {
+                        // TODO: it blocks the mining process I guess
+                        // broadcast block & update peers
+                        let responses: Vec<Response<PostBlockResponse>>;
+                        let failed: Vec<String>;
+
+                        let (peers, responses) = {
+                            println!("DEBUG - checking responses of nodes!"); // debug
+                            let mut peers = self_arc.peers.lock().unwrap(); // lock peers
+
+                            // broadcast block
+                            (responses, failed) = broadcast::<PostBlockResponse>(
+                                &peers,
+                                Dtype::PostBlock,
+                                &block.as_json().to_string(),
+                            );
+                            *peers = subtract_vec(peers.to_vec(), failed); // update peers
+                            (peers, responses) // return peers
+                        };
+
+                        // declare variables for check
+                        let mut agree: Vec<String> = Vec::new();
+                        let mut disagree: Vec<String> = Vec::new();
+
+                        // DEBUG
+                        println!("DEBUG - peers: {:?}", peers);
+                        println!("DEBUG - responses: {:?}", responses);
+
+                        // deserialize responses
+                        for res in responses {
+                            if res.res == PostBlockResponse::Success {
+                                agree.push(res.addr);
+                            } else {
+                                disagree.push(res.addr);
+                            }
+                        }
+
+                        // DEBUG
+                        println!("DEBUG - agree: {:?}", agree);
+                        println!("DEBUG - disagree: {:?}", disagree);
+
+                        // compare responses
+                        if disagree.len() > (agree.len() + disagree.len()) / 2 {
+                            println!("[+] MINER - synchronize node...");
+                            break;
+                        } else {
+                            // request resync of peers of nodes who disagreed
+                            println!("[+] MINER - network accepted block");
+                            broadcast::<CheckSyncResponse>(&disagree, Dtype::CheckSync, "");
+                        }
+                    }
+                    {
+                        // append block to chain
+                        let mut chain = self_arc.blockchain.lock().unwrap();
+                        match chain.add_block(&block) {
+                            Ok(_) => println!("[+] MINER - block added:\n\n{}", block),
+                            Err(e) => eprintln!("[#] MINER - adding block error: {:?}", e),
+                        }
+                    }
+                    // next block to mine
+                    match self_arc.next_block() {
+                        Ok(n) => {
+                            if !n {
+                                eprintln!("[#] MINER - set next block failed");
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[#] MINER - set next block error: {:?}", e);
+                        }
+                    }
+                }
+                {
+                    // synchronize node if necessary
+                    let peers = self_arc.peers.lock().unwrap();
+                    {
+                        // blockchain
+                        let mut chain = self_arc.blockchain.lock().unwrap();
+                        let (state, peers) = match chain.check(&peers) {
+                            Ok(n) => n,
+                            Err(e) => {
+                                eprintln!("[#] MINER - check blockchain error: {:?}", e);
+                                (SyncState::Error, vec![])
+                            }
+                        };
+                        if state != SyncState::Error {
+                            match state {
+                                SyncState::Fine => println!("[+] BLOCKCHAIN - state: fine"),
+                                SyncState::Needed => {
+                                    // sync blockchain
+                                    match chain.sync(peers.choose(&mut thread_rng())
+                                        .expect("[#] MINER - random peer for blockchain sync error")) {
+                                        Ok(n) => match n {
+                                            SyncState::Ready => (),
+                                            SyncState::Running => (),
+                                            _ => panic!("[#] BLOCKCHAIN:SYNC - synchronization failed: {:?}", n),
+                                        },
+                                        Err(e) => eprintln!("[#] BLOCKCHAIN:SYNC - synchronization error: {}", e),
+                                    };
+                                }
+                                _ => (),
+                            }
+                        }
+                    }
+                    {
+                        // transactionpool
+                        let mut pool = self_arc.transactionpool.lock().unwrap();
+                        let (state, peers) = match pool.check(&peers) {
+                            Ok(n) => n,
+                            Err(e) => {
+                                eprintln!("[#] MINER - check transactionpool error: {:?}", e);
+                                (SyncState::Error, vec![])
+                            }
+                        };
+                        if state != SyncState::Error {
+                            match state {
+                                SyncState::Fine => println!("[+] TRANSACTIONPOOL - state: fine"),
+                                SyncState::Needed => {
+                                    // sync transactionpool
+                                    match pool.sync(peers.choose(&mut thread_rng())
+                                        .expect("[#] MINER - random peer for transactionpool sync error")) {
+                                        Ok(n) => match n {
+                                            SyncState::Ready => (),
+                                            _ => panic!("[#] TRANSACTIONPOOL:SYNC - synchronization failed: {:?}", n),
+                                        },
+                                        Err(e) => eprintln!("[#] TRANSACTIONPOOL:SYNC - synchronization error: {}", e),
+                                    };
+                                }
+                                _ => (),
+                            }
+                        }
+                    }
+                    {
+                        // minecontroller
+                        let (state, peers) = match self_arc.check(&peers) {
+                            Ok(n) => n,
+                            Err(e) => {
+                                eprintln!("[#] MINER - check minecontroller error: {:?}", e);
+                                (SyncState::Error, vec![])
+                            }
+                        };
+                        if state != SyncState::Error {
+                            match state {
+                                SyncState::Fine => println!("[+] MINECONTROLLER - state: fine"),
+                                SyncState::Needed => {
+                                    // set sync address
+                                    *self_arc.sync_addr.lock().unwrap() = peers
+                                        .choose(&mut thread_rng())
+                                        .expect(
+                                            "[#] MINER - random peer for minecontroller sync error",
+                                        )
+                                        .to_string();
+                                    // sync minecontroller
+                                    match self_arc.sync(&self_arc.current_block) {
+                                        Ok(n) => match n {
+                                            SyncState::Ready => (),
+                                            _ => panic!("[#] MINECONTROLLER:SYNC - synchronization failed: {:?}", n),
+                                        },
+                                        Err(e) => eprintln!("[#] MINECONTROLLER:SYNC - synchronization error: {}", e),
+                                    };
+                                }
+                                _ => (),
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     /// Send the stop signal to the miner.
     /// Returns bool of success.
     fn send_stop(&self) -> bool {
@@ -853,7 +902,7 @@ impl MineController {
 
     /// Synchronize the currently mined block.
     /// Returns `SyncState::Ready` if everything worked fine.
-    fn sync(&self, current_block: &Arc<Mutex<Block>>) -> Result<SyncState, SyncError> {
+    pub fn sync(&self, current_block: &Arc<Mutex<Block>>) -> Result<SyncState, SyncError> {
         // get address for synchronizing
         let addr = { self.sync_addr.lock().unwrap().clone() };
 
@@ -861,6 +910,7 @@ impl MineController {
         let req = Request {
             dtype: Dtype::GetBlock,
             data: "-2",
+            addr: ADDR.get().unwrap().to_string(),
         };
         // send request
         let stream = match request(&addr, &req) {
@@ -1039,6 +1089,32 @@ impl TransactionPool {
         Ok(())
     }
 
+    /// Check if the transactionpool is synchronized.
+    /// Only returns `SyncState::Fine` with an empty list of peers and `SyncState::Needed` with the
+    /// corresponding peers.
+    pub fn check(&self, peers: &Vec<String>) -> Result<(SyncState, Vec<String>), SyncError> {
+        // map transactionpool merkle hashes
+        let map = collect_map(&peers, Dtype::GetPoolHash, "");
+
+        // get hash of latest block that most nodes share
+        let hash_network = match get_key_by_vec_len(map.clone()) {
+            Some(n) => n,
+            None => return Err(SyncError::InvalidValue),
+        };
+        // get merkle hash of local transactionpool
+        let hashes_local: Vec<String> = self.pool.iter().map(|x| x.hash.clone()).collect();
+        let hash_local = match merkle_hash(hashes_local) {
+            Some(n) => n,
+            None => String::new(),
+        };
+        // check equality of hashes
+        if hash_local == hash_network {
+            Ok((SyncState::Fine, vec![]))
+        } else {
+            Ok((SyncState::Needed, map[&hash_network].clone()))
+        }
+    }
+
     /// Clears all transactions from pool.
     pub fn flush(&mut self) {
         self.pool.clear();
@@ -1057,6 +1133,7 @@ impl TransactionPool {
         let req = Request {
             dtype: Dtype::GetTransactionPool,
             data: "",
+            addr: ADDR.get().unwrap().to_string(),
         };
         // send request
         let stream = match request(addr, &req) {
