@@ -25,7 +25,7 @@ fn main() {
     // construct mutex objects
     let difficulty = Arc::new(Mutex::new(args.difficulty));
     let peers = Arc::new(Mutex::new(Vec::<String>::new()));
-    let transactionpool = Arc::new(Mutex::new(TransactionPool::new()));
+    let transactionpool = Arc::new(Mutex::new(TransactionPool::new(args.tx_per_block)));
     let blockchain = match args.genisis {
         true => Arc::new(Mutex::new(BlockChain::new_with_genisis())),
         false => Arc::new(Mutex::new(BlockChain::new())),
@@ -405,11 +405,6 @@ fn main() {
                     respond(&stream, difficulty.lock().unwrap());
                 }
 
-                Dtype::GetLatestHash => match blockchain.lock().unwrap().get_latest() {
-                    Ok(n) => respond(&stream, n.hash),
-                    Err(_) => respond(&stream, ""),
-                },
-
                 Dtype::GetPoolHash => match merkle_hash(
                     transactionpool
                         .lock()
@@ -521,8 +516,8 @@ fn main() {
     }
 }
 
-// > TODO: other todos
-// TODO: limit amount of transactions (or rather size of blocks)
+// > TODO: implement synchronization of txpb in GetTransactionPool Dtype
+// TODO: other todos
 // TODO: make the node only resyncing until it's valid again
 // TODO: store the blockchain in a file or maybe multiple files
 // TODO: coinbase transaction - generate coins

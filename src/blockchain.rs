@@ -14,6 +14,7 @@ use std::{
     sync::{mpsc, Arc, Mutex, TryLockError},
     thread,
     time::Duration,
+    usize,
 };
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -479,47 +480,6 @@ impl MineController {
     /// Set next block to be mined.
     /// Returns `true` if block was set and `false` if not.
     fn next_block(&self) -> Result<bool, TryLockError<u8>> {
-        let mut pool = match self.transactionpool.try_lock() {
-            Ok(n) => n,
-            Err(_) => {
-                eprintln!("[#] MINECONTROLLER - acquire transactionpool error");
-                return Err(TryLockError::WouldBlock);
-            }
-        };
-        let chain = match self.blockchain.try_lock() {
-            Ok(n) => n,
-            Err(_) => {
-                eprintln!("[#] MINECONTROLLER - acquire blockchain error");
-                return Err(TryLockError::WouldBlock);
-            }
-        };
-        let prev_block = match chain.get_latest() {
-            Ok(n) => n,
-            Err(_) => {
-                eprintln!("[#] MINECONTROLLER - get previous block error");
-                return Ok(false);
-            }
-        };
-
-        // DEBUG
-        println!("DEBUG - transactionpool:\n{:?}", pool.pool);
-
-        // construct block // TODO: limit amount of transactions
-        let block = Block::new(prev_block.index + 1, pool.pool.clone(), prev_block.hash);
-        pool.flush(); // flush pool
-
-        // update current_block property
-        match self.current_block.try_lock() {
-            Ok(mut n) => *n = block,
-            Err(_) => return Err(TryLockError::WouldBlock),
-        }
-        Ok(true)
-    }
-
-    #[allow(dead_code)]
-    /// Set next block to be mined.
-    /// Returns `true` if block was set and `false` if not.
-    fn try_next_block(&self) -> Result<bool, TryLockError<u8>> {
         let mut pool = match self.transactionpool.lock() {
             Ok(n) => n,
             Err(_) => {
@@ -545,9 +505,13 @@ impl MineController {
         // DEBUG
         println!("DEBUG - transactionpool:\n{:?}", pool.pool);
 
-        // construct block // TODO: limit amount of transactions
-        let block = Block::new(prev_block.index + 1, pool.pool.clone(), prev_block.hash);
-        pool.flush(); // flush pool
+        // flush pool
+        let transactions = match pool.flush() {
+            Some(n) => n,
+            None => vec![],
+        };
+        // construct block
+        let block = Block::new(prev_block.index + 1, transactions, prev_block.hash);
 
         // update current_block property
         match self.current_block.lock() {
@@ -1067,12 +1031,16 @@ impl std::fmt::Display for Transaction {
 #[derive(Clone, Debug, Serialize)]
 pub struct TransactionPool {
     pub pool: Vec<Transaction>,
+    tx_per_block: u16,
 }
 
 impl TransactionPool {
     /// Constructor
-    pub fn new() -> TransactionPool {
-        TransactionPool { pool: Vec::new() }
+    pub fn new(txpb: u16) -> Self {
+        TransactionPool {
+            pool: Vec::new(),
+            tx_per_block: txpb,
+        }
     }
 
     /// Adds a transaction to the pool after ensuring it's not already contained.
@@ -1115,9 +1083,24 @@ impl TransactionPool {
         }
     }
 
-    /// Clears all transactions from pool.
-    pub fn flush(&mut self) {
-        self.pool.clear();
+    /// Flush a specific amount of transactions from the pool and return them.
+    pub fn flush(&mut self) -> Option<Vec<Transaction>> {
+        // get amount of transactions to flush
+        let amount: usize = {
+            if usize::from(self.tx_per_block) <= self.pool.len() {
+                self.tx_per_block as usize
+            } else {
+                self.pool.len()
+            }
+        };
+        // retrieve the transactions that are going to be flushed
+        let flushed = match self.pool.get(0..amount) {
+            Some(n) => n.to_vec(),
+            None => return None,
+        };
+        // update pool & return flushed
+        self.pool = subtract_vec(self.pool.clone(), flushed.clone());
+        Some(flushed)
     }
 
     /// Synchronize pool.

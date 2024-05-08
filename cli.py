@@ -67,8 +67,8 @@ def transaction() -> dict:
         "dst": dst,
         "timestamp": timestamp,
         "val": val,
-        "broadcast": False, 
-        # "broadcast": True,
+        # "broadcast": False, 
+        "broadcast": True,
         "hash": hash_
     }
 

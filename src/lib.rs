@@ -28,6 +28,10 @@ pub mod args {
         /// hash difficulty
         #[arg(short, long, default_value_t = 14)]
         difficulty: u8,
+
+        /// max amount of transactions per block
+        #[arg(short, long, default_value_t = 20)]
+        txpb: u16,
     }
 
     #[derive(Debug)]
@@ -37,6 +41,7 @@ pub mod args {
         pub genisis: bool,
         pub entry: String,
         pub difficulty: u8,
+        pub tx_per_block: u16,
     }
 
     pub static ARGS: OnceLock<Args_> = OnceLock::new();
@@ -50,6 +55,7 @@ pub mod args {
             genisis: args.genisis,
             entry: args.entry,
             difficulty: args.difficulty,
+            tx_per_block: args.txpb,
         }
     }
 
