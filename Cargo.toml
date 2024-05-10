@@ -19,3 +19,18 @@ sha2 = "0.10.8"
 [dependencies.uuid]
 version = "1.7.0"
 features = ["v4", "fast-rng", "macro-diagnostics"]
+
+[lib]
+path = "src/node/lib.rs"
+
+[[bin]]
+name = "webserver"
+path = "src/webserver/main.rs"
+
+[[bin]]
+name = "node"
+path = "src/node/main.rs"
+
+[[bin]]
+name = "miner"
+path = "src/miner/main.rs"
