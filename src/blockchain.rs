@@ -1031,7 +1031,7 @@ impl std::fmt::Display for Transaction {
 #[derive(Clone, Debug, Serialize)]
 pub struct TransactionPool {
     pub pool: Vec<Transaction>,
-    tx_per_block: u16,
+    pub tx_per_block: u16,
 }
 
 impl TransactionPool {
@@ -1076,11 +1076,29 @@ impl TransactionPool {
             None => String::new(),
         };
         // check equality of hashes
-        if hash_local == hash_network {
-            Ok((SyncState::Fine, vec![]))
-        } else {
-            Ok((SyncState::Needed, map[&hash_network].clone()))
+        if hash_local != hash_network {
+            return Ok((SyncState::Needed, map[&hash_network].clone()));
         }
+        // check transactions per block
+        let map = collect_map(&peers, Dtype::GetTransactionsPerBlock, "");
+        let network_txpb: u16 = match get_key_by_vec_len(map.clone()) {
+            Some(n) => match n.parse() {
+                Ok(n) => n,
+                Err(e) => {
+                    eprintln!("[#] TRANSACTIONPOOL:CHECK - parse txpb to int error: {}", e);
+                    return Err(SyncError::InvalidValue);
+                }
+            },
+            None => {
+                eprintln!("[#] TRANSACTIONPOOL:CHECK - check transactions per block failed");
+                return Err(SyncError::InvalidValue);
+            }
+        };
+        // check equality of txpb
+        if network_txpb != self.tx_per_block {
+            return Ok((SyncState::Needed, map[&hash_network].clone()));
+        }
+        Ok((SyncState::Fine, vec![]))
     }
 
     /// Flush a specific amount of transactions from the pool and return them.
@@ -1110,9 +1128,38 @@ impl TransactionPool {
     ///
     /// Everything else is either not returned or is an error.
     pub fn sync(&mut self, addr: &str) -> Result<SyncState, SyncError> {
-        println!("[+] TRANSACTIONPOOL:SYNC - updating transaction pool");
+        println!("[+] TRANSACTIONPOOL:SYNC - synchronizing transaction pool");
 
-        // craft request
+        // synchronize transactions per block
+        let req = Request {
+            dtype: Dtype::GetTransactionsPerBlock,
+            data: "",
+            addr: ADDR.get().unwrap().to_string(),
+        };
+        // send request
+        let stream = match request(addr, &req) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[#] TRANSACTIONPOOL:SYNC - request txpb error: {}", e);
+                return Err(SyncError::Request);
+            }
+        };
+        // receive data
+        let response: Response<u16> = match receive(stream) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[#] TRANSACTIONPOOL:SYNC - receive txpb error: {}", e);
+                return Err(SyncError::Receive);
+            }
+        };
+        // update txpb
+        self.tx_per_block = response.res;
+        println!(
+            "[+] TRANSACTIONPOOL:SYNC - update txpb successful: {}",
+            self.tx_per_block
+        );
+
+        // synchronize transactions
         let req = Request {
             dtype: Dtype::GetTransactionPool,
             data: "",

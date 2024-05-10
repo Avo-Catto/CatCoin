@@ -423,14 +423,14 @@ fn main() {
                 }
 
                 Dtype::GetTransactionPool => {
-                    let pool: Vec<String> = transactionpool
-                        .lock()
-                        .unwrap()
-                        .pool
-                        .iter()
-                        .map(|x| x.as_json().to_string())
-                        .collect();
+                    let lock = transactionpool.lock().unwrap();
+                    let pool: Vec<String> =
+                        lock.pool.iter().map(|x| x.as_json().to_string()).collect();
                     respond(&stream, pool);
+                }
+
+                Dtype::GetTransactionsPerBlock => {
+                    respond(&stream, transactionpool.lock().unwrap().tx_per_block);
                 }
 
                 Dtype::PostBlock => {
@@ -516,11 +516,11 @@ fn main() {
     }
 }
 
-// > TODO: implement synchronization of txpb in GetTransactionPool Dtype
 // TODO: other todos
 // TODO: make the node only resyncing until it's valid again
 // TODO: store the blockchain in a file or maybe multiple files
 // TODO: coinbase transaction - generate coins
+// TODO: add fees
 // TODO: make difficulty automatically adjustable (maybe by amount of miners)
 // TODO: add pool feature where nodes have ID's to mine more efficiently
 // TODO: add Docs to functions

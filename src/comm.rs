@@ -100,7 +100,7 @@ pub enum Dtype {
     GetDifficulty,
     GetPeers,
     GetPoolHash,
-    // GetTransactionsPerBlock,
+    GetTransactionsPerBlock,
     GetTransactionPool,
     PostBlock,
     Skip,
