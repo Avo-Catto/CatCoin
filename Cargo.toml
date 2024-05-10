@@ -1,7 +1,6 @@
 [package]
 name = "cat_coin"
 version = "0.1.0"
-edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -9,28 +8,30 @@ edition = "2021"
 base64 = "0.22.0"
 chrono = "0.4.34"
 clap = { version = "4.5.1", features = ["derive"] }
-num-bigint = "0.4.4"
+num-bigint = "0.4.5"
 rand = "0.8.5"
 regex = "1.10.3"
 serde = { version = "1.0.197", features = ["derive"] }
 serde_json = "1.0.114"
 sha2 = "0.10.8"
+node = { path = "node" }
+miner = { path = "miner" }
 
 [dependencies.uuid]
 version = "1.7.0"
 features = ["v4", "fast-rng", "macro-diagnostics"]
 
-[lib]
-path = "src/node/lib.rs"
+[workspace]
+members = ["node", "miner", "webserver"]
 
 [[bin]]
 name = "webserver"
-path = "src/webserver/main.rs"
+path = "webserver/src/main.rs"
 
 [[bin]]
 name = "node"
-path = "src/node/main.rs"
+path = "node/src/main.rs"
 
 [[bin]]
 name = "miner"
-path = "src/miner/main.rs"
+path = "miner/src/main.rs"

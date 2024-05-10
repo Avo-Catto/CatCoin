@@ -1,4 +1,9 @@
-use cat_coin::{blockchain::Block, utils::difficulty_from_u8};
+extern crate base64;
+extern crate node;
+extern crate num_bigint;
+extern crate serde;
+extern crate serde_json;
+use node::{blockchain::Block, utils::difficulty_from_u8};
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use num_bigint::BigUint;

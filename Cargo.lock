@@ -109,6 +109,8 @@ dependencies = [
  "base64",
  "chrono",
  "clap",
+ "miner",
+ "node",
  "num-bigint",
  "rand",
  "regex",
@@ -313,6 +315,34 @@ name = "memchr"
 version = "2.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c8640c5d730cb13ebd907d8d04b52f55ac9a2eec55b440c8892f40d56c76c1d"
+
+[[package]]
+name = "miner"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "node",
+ "num-bigint",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "node"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "clap",
+ "num-bigint",
+ "rand",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "uuid",
+]
 
 [[package]]
 name = "num-bigint"
@@ -601,6 +631,10 @@ name = "wasm-bindgen-shared"
 version = "0.2.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af190c94f2773fdb3729c55b007a722abb5384da03bc0986df4c289bf5567e96"
+
+[[package]]
+name = "webserver"
+version = "0.1.0"
 
 [[package]]
 name = "windows-core"

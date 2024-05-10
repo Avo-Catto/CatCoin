@@ -1,6 +1,8 @@
+extern crate base64;
+extern crate rand;
+use self::base64::{engine::general_purpose::STANDARD, Engine};
+use self::rand::{seq::SliceRandom, thread_rng, Rng};
 use crate::{args::ADDR, comm::*, utils::*};
-use base64::{engine::general_purpose::STANDARD, Engine};
-use rand::{seq::SliceRandom, thread_rng, Rng};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;

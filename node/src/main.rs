@@ -1,9 +1,8 @@
-use cat_coin::{
-    args::{self, ADDR, ARGS},
-    blockchain::*,
-    comm::*,
-    utils::*,
-};
+extern crate node;
+extern crate num_bigint;
+extern crate rand;
+extern crate serde_json;
+use node::{args, blockchain::*, comm::*, utils::*};
 use num_bigint::BigUint;
 use rand::{seq::SliceRandom, thread_rng};
 use serde_json::json;
@@ -19,8 +18,8 @@ use std::{
 fn main() {
     // get args
     args::init();
-    let args = ARGS.get().unwrap().to_owned();
-    let addr = ADDR.get().unwrap().to_string();
+    let args = args::ARGS.get().unwrap().to_owned();
+    let addr = args::ADDR.get().unwrap().to_string();
 
     // construct mutex objects
     let difficulty = Arc::new(Mutex::new(args.difficulty));
@@ -529,6 +528,7 @@ fn main() {
 // TODO: multi signatures
 // TODO: blurring for anonymity
 // TODO: web server + website for hot wallet
+// TODO: licency
 //
 // TODO: in far future:
 // - check if miner is compiled -> if not then compile it and run the binary instead of cargo
