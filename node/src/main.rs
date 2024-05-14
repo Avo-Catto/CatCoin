@@ -2,7 +2,7 @@ extern crate node;
 extern crate num_bigint;
 extern crate rand;
 extern crate serde_json;
-use node::{args, blockchain::*, comm::*, utils::*};
+use node::{blockchain::*, comm::*, share, utils::*};
 use num_bigint::BigUint;
 use rand::{seq::SliceRandom, thread_rng};
 use serde_json::json;
@@ -17,9 +17,24 @@ use std::{
 
 fn main() {
     // get args
-    args::init();
-    let args = args::ARGS.get().unwrap().to_owned();
-    let addr = args::ADDR.get().unwrap().to_string();
+    share::init();
+    let args = unsafe { share::ARGS.get().unwrap().to_owned() };
+    let addr = share::ADDR.get().unwrap().to_string();
+    if !args.genisis {
+        // synchronize args
+        match sync_args(&args.entry) {
+            Ok(n) => match n {
+                SyncState::Ready => (),
+                _ => panic!("[#] ARGS:SYNC - synchronization failed: {:?}", n),
+            },
+            Err(e) => {
+                eprintln!("[#] ARGS:SYNC - synchronization error: {}", e);
+                exit(1);
+            }
+        }
+    }
+    // get updated args
+    let args = unsafe { share::ARGS.get().unwrap().to_owned() };
 
     // construct mutex objects
     let difficulty = Arc::new(Mutex::new(args.difficulty));
@@ -60,7 +75,7 @@ fn main() {
                 exit(1);
             }
         }
-        // update list of peers
+        // synchronize peers
         match sync_peers(&args.entry, &addr, &peers) {
             Ok(n) => match n {
                 SyncState::Ready => (),
@@ -71,6 +86,7 @@ fn main() {
                 exit(1);
             }
         }
+        /*
         // synchronize difficulty
         match sync_difficulty(&args.entry, &difficulty) {
             Ok(n) => match n {
@@ -82,10 +98,12 @@ fn main() {
                 exit(1);
             }
         }
+        */
     }
 
     // construct MineController and start mining
     let mine_controller = Arc::new(MineController::new(
+        &args.wallet,
         &args.entry,
         &blockchain,
         &transactionpool,
@@ -241,6 +259,8 @@ fn main() {
                         }
                     }
                 }
+
+                Dtype::GetArgs => respond(&stream, args.as_json().to_string()),
 
                 // TODO: prevent dos attack here
                 Dtype::CheckSync => {
@@ -432,6 +452,7 @@ fn main() {
                     respond(&stream, transactionpool.lock().unwrap().tx_per_block);
                 }
 
+                // TODO: handle coinbase transaction - the destination address will be different
                 Dtype::PostBlock => {
                     // load data as json
                     let data = match serde_json::Value::from_str(&request.data) {
@@ -515,10 +536,10 @@ fn main() {
     }
 }
 
+// > TODO: coinbase transaction - generate coins
 // TODO: other todos
 // TODO: make the node only resyncing until it's valid again
 // TODO: store the blockchain in a file or maybe multiple files
-// TODO: coinbase transaction - generate coins
 // TODO: add fees
 // TODO: make difficulty automatically adjustable (maybe by amount of miners)
 // TODO: add pool feature where nodes have ID's to mine more efficiently

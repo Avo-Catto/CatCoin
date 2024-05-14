@@ -1,4 +1,4 @@
-use crate::args::ADDR;
+use crate::share::ADDR;
 use rand::{seq::SliceRandom, thread_rng};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -95,9 +95,10 @@ pub enum Dtype {
     AddPeer,
     AddTransaction,
     CheckSync,
+    GetArgs,
     GetBlock,
     GetBlockchain,
-    GetDifficulty,
+    GetDifficulty, // TODO: if I sync the args I won't need that anymore
     GetPeers,
     GetPoolHash,
     GetTransactionsPerBlock,

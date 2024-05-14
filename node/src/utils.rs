@@ -1,13 +1,25 @@
 // use crate::blockchain::BlockChain;
-use crate::{args::ADDR, comm::*};
+use crate::{
+    comm::*,
+    share::{ADDR, ARGS},
+};
 use chrono::Utc;
 use num_bigint::BigUint;
 use regex::Regex;
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
+
+#[derive(Deserialize)]
+struct ArgsReceiver {
+    difficulty: u8,
+    tx_per_block: u16,
+    reward: f64,
+    halving: u64,
+}
 
 #[derive(Debug)]
 pub enum BlockError {
@@ -122,6 +134,12 @@ pub fn difficulty_from_u8(difficulty: u8) -> BigUint {
     BigUint::parse_bytes(hex_str.as_bytes(), 16).unwrap()
 }
 
+/// Calculate the current blockreward by the index of the current block.
+pub fn get_blockreward(idx: u64) -> f64 {
+    let args = unsafe { ARGS.get().unwrap() };
+    args.reward * 0.5_f64.powf((idx / args.halving) as f64)
+}
+
 /// Function to get the key of a HashMap by the length of the value.
 pub fn get_key_by_vec_len<V>(map: HashMap<String, Vec<V>>) -> Option<String> {
     let mut max = match map.keys().last() {
@@ -189,6 +207,59 @@ pub fn subtract_vec<T: PartialEq>(mut x: Vec<T>, y: Vec<T>) -> Vec<T> {
         };
     }
     x
+}
+
+/// TEST: Synchronize ARGS.
+/// Returns `SyncState::Ready` if the synchronization succeeds.
+pub fn sync_args(addr: &str) -> Result<SyncState, SyncError> {
+    println!("[+] ARGS:SYNC - updating arguments");
+
+    // craft request
+    let req = Request {
+        dtype: Dtype::GetArgs,
+        data: "",
+        addr: ADDR.get().unwrap().to_string(),
+    };
+    // connect to node
+    let stream = match request(addr, &req) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("[#] ARGS:SYNC - request args error: {}", e);
+            return Err(SyncError::Request);
+        }
+    };
+    // receive args
+    let response: Response<String> = match receive(stream) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("[#] ARGS:SYNC - receive args error: {}", e);
+            return Err(SyncError::Receive);
+        }
+    };
+    // parse json from string
+    let json: ArgsReceiver = match serde_json::from_str(&response.res) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("[#] ARGS:SYNC - parse json error: {}", e);
+            return Err(SyncError::InvalidValue);
+        }
+    };
+    unsafe {
+        // update args
+        match ARGS.get_mut() {
+            Some(args) => {
+                args.difficulty = json.difficulty;
+                args.tx_per_block = json.tx_per_block;
+                args.reward = json.reward;
+                args.halving = json.halving;
+            }
+            None => {
+                eprintln!("[#] ARGS:SYNC - get mutable reference failed");
+                return Err(SyncError::InvalidValue);
+            }
+        };
+    }
+    Ok(SyncState::Ready)
 }
 
 /// Synchronize the difficulty.

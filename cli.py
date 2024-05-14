@@ -138,7 +138,9 @@ if __name__ == '__main__':
     # send transaction
     elif args['type'] == 'transaction':
         for i in range(args['count']):
-            res = send("AddTransaction", transaction(), ADDRESS)
+            t = transaction()
+            print(t)
+            res = send("AddTransaction", t, ADDRESS)
             print(f'Response: {res}')
             sleep(args['delay'])
     

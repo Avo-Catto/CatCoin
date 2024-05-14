@@ -1,8 +1,11 @@
 pub mod blockchain;
 pub mod comm;
 pub mod utils;
-pub mod args {
+pub mod share {
+    use chrono::Utc;
     use clap::Parser;
+    use serde_json::json;
+    use sha2::{Digest, Sha256};
     use std::process::exit;
     use std::sync::OnceLock;
 
@@ -31,6 +34,18 @@ pub mod args {
         /// max amount of transactions per block
         #[arg(short, long, default_value_t = 20)]
         txpb: u16,
+
+        /// address of wallet to mine for
+        #[arg(short, long, default_value_t = String::new())]
+        wallet: String,
+
+        /// starting block reward
+        #[arg(short, long, default_value_t = 100.0)]
+        reward: f64,
+
+        /// blocks until halving
+        #[arg(long, default_value_t = 100)]
+        halving: u64,
     }
 
     #[derive(Debug)]
@@ -41,12 +56,27 @@ pub mod args {
         pub entry: String,
         pub difficulty: u8,
         pub tx_per_block: u16,
+        pub wallet: String,
+        pub reward: f64,
+        pub halving: u64,
+    }
+    impl Args_ {
+        /// Return the necessary information for synchronization as json.
+        pub fn as_json(&self) -> serde_json::Value {
+            json!({
+                "difficulty": self.difficulty,
+                "tx_per_block": self.tx_per_block,
+                "reward": self.reward,
+                "halving": self.halving,
+            })
+        }
     }
 
-    pub static ARGS: OnceLock<Args_> = OnceLock::new();
+    pub static mut ARGS: OnceLock<Args_> = OnceLock::new();
     pub static ADDR: OnceLock<String> = OnceLock::new();
+    pub static COINBASE: OnceLock<String> = OnceLock::new();
 
-    pub fn parse_args() -> Args_ {
+    fn parse_args() -> Args_ {
         let args = Args::parse();
         Args_ {
             ip: args.ip,
@@ -55,19 +85,28 @@ pub mod args {
             entry: args.entry,
             difficulty: args.difficulty,
             tx_per_block: args.txpb,
+            wallet: String::from("744be6c0-eb88-49d7-bf27-bf5a211a6b9e"), // DEBUG TODO args.wallet,
+            reward: args.reward,
+            halving: args.halving,
         }
     }
 
     pub fn init() {
-        // get args
-        ARGS.get_or_init(|| parse_args());
+        unsafe {
+            // get args
+            ARGS.get_or_init(|| parse_args());
 
-        // format address
-        ADDR.get_or_init(|| format!("{}:{}", ARGS.get().unwrap().ip, ARGS.get().unwrap().port));
-        // check args
-        if ARGS.get().unwrap().difficulty < 1 || ARGS.get().unwrap().difficulty > 71 {
-            eprintln!("[#] ARGS - invalid difficulty (allowed: 1 - 71)");
-            exit(1);
+            // check args
+            if ARGS.get().unwrap().difficulty < 1 || ARGS.get().unwrap().difficulty > 71 {
+                eprintln!("[#] ARGS - invalid difficulty (allowed: 1 - 71)");
+                exit(1);
+            }
+            // TODO: check if wallet address is valid
+            // format address
+            ADDR.get_or_init(|| format!("{}:{}", ARGS.get().unwrap().ip, ARGS.get().unwrap().port));
         }
+        // set coinbase address
+        COINBASE
+            .get_or_init(|| format!("{:x}", Sha256::digest(Utc::now().timestamp().to_le_bytes())));
     }
 }
