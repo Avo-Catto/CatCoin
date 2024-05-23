@@ -85,7 +85,7 @@ pub mod share {
             entry: args.entry,
             difficulty: args.difficulty,
             tx_per_block: args.txpb,
-            wallet: String::from("744be6c0-eb88-49d7-bf27-bf5a211a6b9e"), // DEBUG TODO args.wallet,
+            wallet: String::from("9Jdoux3vuwqMu5zUBkxCCDfpCoxb7tyKzmJwZoVkrfS32VeRFBUobQs"), // DEBUG TODO args.wallet,
             reward: args.reward,
             halving: args.halving,
         }
@@ -105,8 +105,19 @@ pub mod share {
             // format address
             ADDR.get_or_init(|| format!("{}:{}", ARGS.get().unwrap().ip, ARGS.get().unwrap().port));
         }
+
         // set coinbase address
-        COINBASE
-            .get_or_init(|| format!("{:x}", Sha256::digest(Utc::now().timestamp().to_le_bytes())));
+        let c = Sha256::digest(Utc::now().timestamp().to_le_bytes());
+
+        // calculate checksum
+        let d = Sha256::digest(c);
+        let mut checksum = d[0..8].to_vec();
+
+        // append checksum
+        let mut c = c.to_vec();
+        c.append(&mut checksum);
+
+        // encoded & set address
+        COINBASE.get_or_init(|| bs58::encode(&c).into_string());
     }
 }

@@ -7,9 +7,11 @@ use crate::{
     share::{ADDR, ARGS, COINBASE},
     utils::*,
 };
+use bs58;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::{
     any::Any,
     error::Error,
@@ -97,7 +99,7 @@ impl Block {
 
     /// Performs regex checks on the properties of the block, recalculates it's hashes and
     /// validates its transactions.
-    // FIXME: throws transaction invalid: MismatchSource
+    // TODO: validate coinbase transaction
     pub fn validate(&self) -> Result<(), BlockError> {
         // check if values of block are valid using regex
         let sha256_re = Regex::new("^[a-fA-F0-9]{64}$").unwrap();
@@ -996,6 +998,27 @@ impl Transaction {
         })
     }
 
+    /// Validate an address.
+    fn check_address(addr: &str) -> bool {
+        // decode address
+        let decoded_addr = match bs58::decode(addr).into_vec() {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[#] validate address error: {}", e);
+                return false;
+            }
+        };
+        // check length
+        if decoded_addr.len() != 40 {
+            return false;
+        }
+        // validate checksum
+        let checksum = &decoded_addr.clone()[32..decoded_addr.len()];
+        let c = Sha256::digest(&decoded_addr[..32]);
+        let foo = &c[0..8];
+        checksum == foo
+    }
+
     /// Generate the coinbase transaction.
     pub fn get_coinbase(reward: f64) -> Self {
         let wallet = unsafe { &ARGS.get().unwrap().wallet };
@@ -1046,19 +1069,15 @@ impl Transaction {
     }
 
     /// Performs regex checks on the properties of the transaction and recalculates its hash.
+    // TODO: check if address even have enough coins
     pub fn validate(&self) -> Result<(), TVE> {
-        // check if values of transaction are valid
-        let uuid_re = Regex::new("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$").unwrap();
-
-        /* TODO temporarily deactivated because of format of coinbase address
-        // checksrc
-        if !uuid_re.is_match(&self.src) {
-            return Err(TVE::MismatchSource);
+        // check source
+        if !Self::check_address(&self.src) {
+            return Err(TVE::InvalidSource);
         }
-        */
-        // check dst
-        if !uuid_re.is_match(&self.dst) {
-            return Err(TVE::MismatchDestination);
+        // check destination
+        if !Self::check_address(&self.dst) {
+            return Err(TVE::InvalidDestination);
         }
         // check hash
         if self.recalc_hash() != self.hash {

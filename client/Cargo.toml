@@ -1,0 +1,23 @@
+[package]
+name = "client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bs58 = "0.5.1"
+openssl = "0.10.64"
+rand = "0.8.5"
+rcgen = "0.13.1"
+sha2 = "0.10.8"
+aes-gcm = "0.10.3"
+serde_json = "1.0.117"
+serde = "1.0.202"
+chrono = "0.4.38"
+
+[dependencies.uuid]
+version = "1.8.0"
+features = [
+    "v4",                # Lets you generate random UUIDs
+    "fast-rng",          # Use a faster (but still sufficiently random) RNG
+    "macro-diagnostics", # Enable better diagnostics for compile-time UUIDs
+]

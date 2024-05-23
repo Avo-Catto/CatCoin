@@ -537,6 +537,8 @@ fn main() {
 }
 
 // > TODO: coinbase transaction - generate coins
+// > TODO: wallet generation
+// > TODO: crawling blockchain -> blurring for anonymity
 // TODO: other todos
 // TODO: make the node only resyncing until it's valid again
 // TODO: store the blockchain in a file or maybe multiple files
@@ -547,7 +549,6 @@ fn main() {
 // TODO: improve logging -> write a logger
 // TODO: real signatures and real wallet addresses
 // TODO: multi signatures
-// TODO: blurring for anonymity
 // TODO: web server + website for hot wallet
 // TODO: licency
 //

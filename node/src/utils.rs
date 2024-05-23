@@ -88,8 +88,8 @@ pub enum SyncState {
 
 #[derive(Debug)]
 pub enum TransactionValidationError {
-    MismatchSource,
-    MismatchDestination,
+    InvalidSource,
+    InvalidDestination,
     MismatchHash,
 }
 pub type TVE = TransactionValidationError;

@@ -1,5 +1,7 @@
 - deviation of timestamp: 5 minutes
 
+> *Note:* openssl has to be installed on the system
+
 - **Node Communication DTypes**
 
     - **DTYPE:**

@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 base64 = "0.22.0"
+bs58 = "0.5.1"
 chrono = "0.4.34"
 clap = { version = "4.5.1", features = ["derive"] }
 num-bigint = "0.4.5"
