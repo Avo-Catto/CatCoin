@@ -1,6 +1,7 @@
 extern crate aes_gcm;
 extern crate bs58;
 extern crate chrono;
+extern crate node;
 extern crate openssl;
 extern crate rand;
 extern crate rcgen;
@@ -20,6 +21,8 @@ use self::serde::{Deserialize, Serialize};
 use self::serde_json::json;
 use self::sha2::{Digest, Sha256, Sha512};
 use crate::{KEY_PATH, WALLET_PATH};
+use node::comm::{receive, request, Dtype, Request, Response};
+use rocket::http::hyper::request;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::{error::Error, io};
@@ -55,9 +58,8 @@ impl Transaction {
         }
     }
 
-    pub fn sign(&self, wallet: Wallet) {
-        sign
-    }
+    // TODO
+    pub fn sign(&self, wallet: Wallet) {}
 
     // TODO
     fn check_address() {}
@@ -203,11 +205,7 @@ impl Wallet {
                 return Err(Box::new(e));
             }
         };
-
-        // DEBUG
-        println!("DEBUG - pub key size: {}", pub_key.len()); // DEBUG
-        println!("DEBUG - priv key size: {}", priv_key.len()); // DEBUG
-
+        // construct wallet
         Ok(Wallet {
             idx_addr: json.idx_addr,
             passphrase: json.passphrase,
@@ -375,6 +373,18 @@ impl Wallet {
             self.idx_addr = idx;
         }
         f
+    }
+
+    // TODO: don't hardcode this shit
+    fn get_transactions(&self, addresses: Vec<String>) {
+        let req = Request {
+            dtype: Dtype::GetTransactions,
+            data: addresses,
+            addr: String::new(),
+        };
+        let stream = request("127.0.0.1:8000", &req);
+        let res = receive(stream);
+        // TODO: YOU STOPPED HERE
     }
 }
 

@@ -49,7 +49,9 @@ pub fn output_framed(text: &str) {
 }
 
 pub fn output(text: &str) {
-    println!(" [+]  {}", text);
+    for i in text.split('\n') {
+        println!(" [+]  {}", i);
+    }
 }
 
 pub fn setup() {

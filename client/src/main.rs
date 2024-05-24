@@ -9,7 +9,9 @@ const USER_PATH: &'static str = "client/data/passwd";
 const KEY_PATH: &'static str = "client/data/keys";
 const WALLET_PATH: &'static str = "client/data/wallets";
 
-fn help() {}
+fn help() {
+    output("new -> address / user / wallet\nwhoami\nlogin\nlogout\nlist -> addresses");
+}
 
 fn main() {
     setup();
@@ -22,6 +24,7 @@ fn main() {
         }
         // process input
         match cmd[0].as_str() {
+            "help" => help(),
             "new" => {
                 if cmd.len() < 2 {
                     continue;

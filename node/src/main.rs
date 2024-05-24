@@ -7,6 +7,7 @@ use num_bigint::BigUint;
 use rand::{seq::SliceRandom, thread_rng};
 use serde_json::json;
 use std::{
+    convert::TryInto,
     io::Read,
     net::{Shutdown, TcpListener},
     process::exit,
@@ -86,19 +87,6 @@ fn main() {
                 exit(1);
             }
         }
-        /*
-        // synchronize difficulty
-        match sync_difficulty(&args.entry, &difficulty) {
-            Ok(n) => match n {
-                SyncState::Ready => (),
-                _ => panic!("[#] DIFFICULTY:SYNC - synchronization failed: {:?}", n),
-            },
-            Err(e) => {
-                eprintln!("[#] DIFFICULTY:SYNC - synchronization error: {}", e);
-                exit(1);
-            }
-        }
-        */
     }
 
     // construct MineController and start mining
@@ -420,10 +408,6 @@ fn main() {
                     respond(&stream, blocks);
                 }
 
-                Dtype::GetDifficulty => {
-                    respond(&stream, difficulty.lock().unwrap());
-                }
-
                 Dtype::GetPoolHash => match merkle_hash(
                     transactionpool
                         .lock()
@@ -439,6 +423,43 @@ fn main() {
 
                 Dtype::GetPeers => {
                     respond(&stream, peers.lock().unwrap());
+                }
+
+                Dtype::GetTransactions => {
+                    // parse received patterns
+                    let pattern_strings: Vec<String> = match request.data.parse() {
+                        Ok(n) => n,
+                        Err(e) => {
+                            eprintln!("[#] DTYPE:GetTransactions - parse to Vec<String> error");
+                            respond::<Vec<Transaction>>(&stream, Vec::new());
+                        }
+                    };
+                    // parse each pattern
+                    let mut patterns: Vec<Vec<u8>> = Vec::new();
+                    for i in pattern_strings {
+                        let mut err = false;
+                        let pattern: Vec<u8> = request
+                            .data
+                            .chars()
+                            .map(|x| match u8::from_str(&x.to_string()) {
+                                Ok(n) => n,
+                                Err(_) => {
+                                    err = true;
+                                    0
+                                }
+                            })
+                            .collect();
+                        patterns.push(pattern);
+                    }
+                    // check if error occurred
+                    if err {
+                        eprintln!("[#] DTYPE:GetTransactions - parse to u8 error");
+                        respond::<Vec<Transaction>>(&stream, Vec::new());
+                        return;
+                    }
+                    // search for transactions using the patterns
+                    let chain = { blockchain.lock().unwrap().clone() };
+                    respond(&stream, chain.get_txs_by_sig(patterns))
                 }
 
                 Dtype::GetTransactionPool => {

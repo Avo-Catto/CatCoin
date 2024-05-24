@@ -18,7 +18,7 @@ use std::{
     io::{BufReader, BufWriter, Read, Write},
     panic::catch_unwind,
     process::{Child, Command, Stdio},
-    str::FromStr,
+    str::{Bytes, FromStr},
     sync::{mpsc, Arc, Mutex, TryLockError},
     thread,
     time::Duration,
@@ -326,6 +326,19 @@ impl BlockChain {
         } else {
             Ok(latest.unwrap().clone())
         }
+    }
+
+    /// Returns a list of transactions where the source address matches a specific pattern.
+    pub fn get_txs_by_sig(&self, patterns: Vec<Vec<u8>>) -> Vec<Transaction> {
+        let mut out: Vec<Transaction> = Vec::new();
+        for block in self.get_chain() {
+            for transaction in block.transactions {
+                if patterns.contains(&addr_to_pattern(&transaction.src)) {
+                    out.push(transaction)
+                }
+            }
+        }
+        out
     }
 
     // TODO: make it only resync the blocks until the chain was correct

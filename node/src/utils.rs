@@ -94,6 +94,12 @@ pub enum TransactionValidationError {
 }
 pub type TVE = TransactionValidationError;
 
+/// Convert address to pattern.
+pub fn addr_to_pattern(addr: &str) -> Vec<u8> {
+    let out: Vec<u8> = addr.bytes().map(|x| 2 % x).collect();
+    out
+}
+
 /// Performs a regex check for an address.
 /// Example: 127.0.0.1:8080 - valid
 pub fn check_addr(addr: &String) -> bool {
@@ -209,7 +215,6 @@ pub fn subtract_vec<T: PartialEq>(mut x: Vec<T>, y: Vec<T>) -> Vec<T> {
     x
 }
 
-/// TEST: Synchronize ARGS.
 /// Returns `SyncState::Ready` if the synchronization succeeds.
 pub fn sync_args(addr: &str) -> Result<SyncState, SyncError> {
     println!("[+] ARGS:SYNC - updating arguments");
@@ -259,44 +264,6 @@ pub fn sync_args(addr: &str) -> Result<SyncState, SyncError> {
             }
         };
     }
-    Ok(SyncState::Ready)
-}
-
-/// Synchronize the difficulty.
-/// Returns `SyncState::Ready` if the synchronization succeeds.
-pub fn sync_difficulty(addr: &str, difficulty: &Arc<Mutex<u8>>) -> Result<SyncState, SyncError> {
-    println!("[+] DIFFICULTY:SYNC - updating difficulty");
-
-    // craft request
-    let req = Request {
-        dtype: Dtype::GetDifficulty,
-        data: "",
-        addr: ADDR.get().unwrap().to_string(),
-    };
-    // connect to node
-    let stream = match request(addr, &req) {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!("[#] DIFFICULTY:SYNC - request difficulty error: {}", e);
-            return Err(SyncError::Request);
-        }
-    };
-    // receive difficulty
-    let response: Response<u8> = match receive(stream) {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!("[#] DIFFICULTY:SYNC - receive difficulty error: {}", e);
-            return Err(SyncError::Receive);
-        }
-    };
-    // check difficulty
-    if response.res < 1 || response.res > 71 {
-        eprintln!("[#] DIFFICULTY:SYNC - invalid difficulty");
-        return Err(SyncError::InvalidValue);
-    }
-    // update difficulty
-    *difficulty.lock().unwrap() = response.res;
-    println!("[+] DIFFICULTY:SYNC - update difficulty successful");
     Ok(SyncState::Ready)
 }
 

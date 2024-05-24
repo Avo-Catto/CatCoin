@@ -56,6 +56,11 @@ impl std::fmt::Debug for CheckSyncResponse {
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub enum GetTransactionsResponse {
+    ParsingError,
+}
+
 #[derive(Deserialize, PartialEq)]
 pub enum PostBlockResponse {
     AddToChainError,
@@ -98,9 +103,9 @@ pub enum Dtype {
     GetArgs,
     GetBlock,
     GetBlockchain,
-    GetDifficulty, // TODO: if I sync the args I won't need that anymore
     GetPeers,
     GetPoolHash,
+    GetTransactions,
     GetTransactionsPerBlock,
     GetTransactionPool,
     PostBlock,
