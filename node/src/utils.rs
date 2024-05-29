@@ -1,15 +1,16 @@
 // use crate::blockchain::BlockChain;
 use crate::{
     comm::*,
-    share::{ADDR, ARGS},
+    share::{ADDR, ARGS, FEE},
 };
 use chrono::Utc;
 use num_bigint::BigUint;
 use regex::Regex;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha224, Sha256, Sha512};
 use std::{
     collections::HashMap,
+    error::Error,
     sync::{Arc, Mutex},
 };
 
@@ -19,6 +20,7 @@ struct ArgsReceiver {
     tx_per_block: u16,
     reward: f64,
     halving: u64,
+    fee: u8,
 }
 
 #[derive(Debug)]
@@ -88,16 +90,27 @@ pub enum SyncState {
 
 #[derive(Debug)]
 pub enum TransactionValidationError {
+    BalanceError,
     InvalidSource,
+    InvalidSignature,
     InvalidDestination,
-    MismatchHash,
+    InvalidValue,
+    SignatureError,
+    InvalidBalance,
 }
 pub type TVE = TransactionValidationError;
 
 /// Convert address to pattern.
 pub fn addr_to_pattern(addr: &str) -> Vec<u8> {
-    let out: Vec<u8> = addr.bytes().map(|x| 2 % x).collect();
+    let out: Vec<u8> = addr.bytes().map(|x| x % 2).collect();
     out
+}
+
+/// Calculate the fee of a transaction by it's value.
+pub fn calc_fee(val: f64) -> f64 {
+    let fee = *FEE.get().unwrap();
+    let fee = fee as f64;
+    val * (fee / 100.0)
 }
 
 /// Performs a regex check for an address.
@@ -140,6 +153,25 @@ pub fn difficulty_from_u8(difficulty: u8) -> BigUint {
     BigUint::parse_bytes(hex_str.as_bytes(), 16).unwrap()
 }
 
+/// Generate an address based on the index.
+pub fn gen_address(pub_key: &Vec<u8>, idx: u32, salt: &String) -> String {
+    // hash public key
+    let mut a = Sha512::digest(pub_key).to_vec();
+    let mut b = a.clone();
+
+    // append index & salt for uniqueness
+    b.extend_from_slice(format!(":{}:{}", idx, salt).as_bytes());
+    a.extend_from_slice(&Sha256::digest(&b));
+
+    // hash again
+    let mut c = Sha224::digest(&a).to_vec();
+    c.extend_from_slice(format!(":{}:{}", idx, salt).as_bytes());
+
+    // encode address
+    let f = bs58::encode(&b).into_string();
+    f
+}
+
 /// Calculate the current blockreward by the index of the current block.
 pub fn get_blockreward(idx: u64) -> f64 {
     let args = unsafe { ARGS.get().unwrap() };
@@ -159,6 +191,32 @@ pub fn get_key_by_vec_len<V>(map: HashMap<String, Vec<V>>) -> Option<String> {
         }
     }
     Some(max)
+}
+
+/// Get the timestamp by human notation.
+/// Example:
+/// 2m:3h:5d:2w - valid after 2 minutes, 3 hours, 5 days, 2 weeks
+pub fn get_timestamp(syntax: &str) -> Result<i64, Box<dyn Error>> {
+    let syntax = syntax.to_string();
+    if syntax.len() < 3 {
+        return Ok(0);
+    }
+    let mut out = 0_i64;
+    for i in syntax.split(':') {
+        let (multi, t) = i.split_at(i.len() - 1);
+        let multi: i64 = match multi.parse() {
+            Ok(n) => n,
+            Err(e) => return Err(Box::new(e)),
+        };
+        match t {
+            "m" => out += 60 * multi,
+            "h" => out += 60 * 60 * multi,
+            "d" => out += 60 * 60 * 24 * multi,
+            "w" => out += 60 * 60 * 24 * 7 * multi,
+            _ => (),
+        }
+    }
+    Ok(out)
 }
 
 /// Returns the SHA256 hash of a byte array.
@@ -257,6 +315,7 @@ pub fn sync_args(addr: &str) -> Result<SyncState, SyncError> {
                 args.tx_per_block = json.tx_per_block;
                 args.reward = json.reward;
                 args.halving = json.halving;
+                args.fee = json.fee;
             }
             None => {
                 eprintln!("[#] ARGS:SYNC - get mutable reference failed");

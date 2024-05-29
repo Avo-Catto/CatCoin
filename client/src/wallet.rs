@@ -1,6 +1,7 @@
 extern crate aes_gcm;
 extern crate bs58;
 extern crate chrono;
+extern crate md5;
 extern crate node;
 extern crate openssl;
 extern crate rand;
@@ -8,88 +9,204 @@ extern crate rcgen;
 extern crate serde;
 extern crate serde_json;
 extern crate sha2;
-
-// use self::bs58;
 use self::aes_gcm::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
     Aes256Gcm, Key, Nonce,
 };
 use self::chrono::Utc;
-use self::openssl::{pkey::PKey, rsa::Rsa, sign::Signer, symm::Cipher};
+use self::node::{
+    comm::{receive, request, Dtype, Request},
+    utils::TVE,
+};
+use self::openssl::{
+    error::ErrorStack,
+    hash::MessageDigest,
+    pkey::PKey,
+    rsa::Rsa,
+    sign::{Signer, Verifier},
+    symm::Cipher,
+};
 use self::rand::{thread_rng, Rng};
 use self::serde::{Deserialize, Serialize};
 use self::serde_json::json;
-use self::sha2::{Digest, Sha256, Sha512};
-use crate::{KEY_PATH, WALLET_PATH};
-use node::comm::{receive, request, Dtype, Request, Response};
-use rocket::http::hyper::request;
-use std::fs::{self, File};
-use std::io::{Read, Write};
-use std::{error::Error, io};
+use self::sha2::{Digest, Sha224, Sha256, Sha512};
+use crate::{output, ADDRESS, FEE, KEY_PATH, WALLET_PATH};
+use std::{
+    error::Error,
+    fs::{self, File},
+    io::{self, Read, Write},
+};
 use uuid::Uuid;
 
-/// Returns the current timestamp.
-pub fn timestamp_now() -> i64 {
-    Utc::now().timestamp()
-}
-
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Transaction {
-    pub src: String,
-    pub dst: String,
-    pub val: f64,
-    pub timestamp: i64, // timestamp when the transaction will be valid
-    pub signature: String,
-    pub pub_key: Vec<u8>,
-    pub broadcast: bool,
+    pub src: String,        // Address of sender
+    pub dst: String,        // Address of receiver
+    pub val: f64,           // Amount of coins
+    pub timestamp: i64,     // when transaction will be valid
+    pub signature: Vec<u8>, // signature
+    pub pub_key: Vec<u8>,   // public key
+    pub broadcast: bool,    // should the transaction be broadcasted - always true
+    pub fee: f64,           // Address of node to receive it's fees
 }
 
 impl Transaction {
     // Constructor
-    pub fn new(src: String, dst: String, val: f64, valid_after: String) -> Self {
-        Transaction {
-            src,
-            dst,
+    pub fn new(src: &str, dst: &str, val: f64, after: &str) -> Result<Self, Box<dyn Error>> {
+        let add = match get_timestamp(after) {
+            Ok(n) => n,
+            Err(e) => return Err(e),
+        };
+        Ok(Transaction {
+            src: src.to_string(),
+            dst: dst.to_string(),
             val,
-            timestamp: timestamp_now(), // TODO: temporarily
-            signature: String::new(),
+            timestamp: timestamp_now() + add,
+            signature: Vec::new(),
             pub_key: Vec::new(),
             broadcast: true,
-        }
+            fee: calc_fee(val),
+        })
     }
 
-    // TODO
-    pub fn sign(&self, wallet: Wallet) {}
+    pub fn as_json(&self) -> serde_json::Value {
+        json!({
+            "src": self.src,
+            "dst": self.dst,
+            "val": self.val,
+            "timestamp": self.timestamp,
+            "signature": self.signature,
+            "pub_key": self.pub_key,
+            "broadcast": self.broadcast,
+            "fee": self.fee,
+        })
+    }
 
-    // TODO
-    fn check_address() {}
+    /// Check signature.
+    fn check_sign(&self) -> Result<bool, ErrorStack> {
+        // load public key
+        let pkey = match PKey::public_key_from_pem(&self.pub_key) {
+            Ok(n) => n,
+            Err(e) => return Err(e),
+        };
+        // construct verifier
+        let verifier = match Verifier::new(MessageDigest::sha1(), &pkey) {
+            Ok(n) => n,
+            Err(e) => return Err(e),
+        };
+        // verify
+        verifier.verify(&self.signature)
+    }
 
-    // TODO: check if wallet has enough coins
-    fn check_value() {}
+    /// Sign the transaction.
+    pub fn sign(&mut self, wallet: &Wallet) -> Result<(), Box<dyn Error>> {
+        self.pub_key = wallet.pub_key.clone();
+        let priv_key = match PKey::private_key_from_pem_passphrase(
+            &wallet.priv_key,
+            wallet.passphrase.as_bytes(),
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[#] TRANSACTION:sign - load private key error: {}", e);
+                return Err(Box::new(e));
+            }
+        };
+        let mut signer = match Signer::new(MessageDigest::sha1(), &priv_key) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[#] TRANSACTION:sign - construct signer error: {}", e);
+                return Err(Box::new(e));
+            }
+        };
+        match signer.update(format!("{}", self).as_bytes()) {
+            Ok(_) => (),
+            Err(e) => {
+                eprintln!("[#] TRANSACTION:sign - update signer error: {}", e);
+                return Err(Box::new(e));
+            }
+        };
+        self.signature = match signer.sign_to_vec() {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[#] TRANSACTION:sign - sign transaction error: {}", e);
+                return Err(Box::new(e));
+            }
+        };
+        Ok(())
+    }
 
-    // TODO
-    fn valid_after_to_timestamp() {}
+    /// Check entire transaction.
+    pub fn validate(&self) -> Result<(), TVE> {
+        // check source
+        if !check_addr_by_key(&self.src, &self.pub_key) {
+            println!("key");
+            return Err(TVE::InvalidSource);
+        }
+        if !check_addr_by_sum(&self.src) {
+            println!("sum");
+            return Err(TVE::InvalidSource);
+        }
+        // check destination
+        if !check_addr_by_sum(&self.dst) {
+            return Err(TVE::InvalidDestination);
+        }
+        // check value
+        if self.val < 0.0 {
+            return Err(TVE::InvalidValue);
+        }
+        // check balance
+        let balance = match get_balance(&self.src) {
+            Ok(n) => n,
+            Err(_) => return Err(TVE::BalanceError),
+        };
+        if balance < self.val + self.fee {
+            return Err(TVE::InvalidBalance);
+        }
+        // check signature
+        match self.check_sign() {
+            Ok(n) => {
+                if !n {
+                    return Err(TVE::InvalidSignature);
+                }
+            }
+            Err(e) => {
+                eprintln!("[#] TRANSACTION:validate - check signature error: {}", e);
+                return Err(TVE::SignatureError);
+            }
+        }
+        Ok(())
+    }
+}
+impl std::fmt::Display for Transaction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Source:{}\nDestination: {}\nValue: {}",
+            self.src, self.dst, self.val,
+        )
+    }
 }
 
 #[derive(Debug)]
 pub struct Wallet {
+    pub addr_salts: Vec<String>,
     pub idx_addr: u32,
+    pub placeholder: bool,
+    pub pub_key: Vec<u8>,
     passphrase: String,
     priv_key: Vec<u8>,
-    pub_key: Vec<u8>,
     salt: String,
     uid: Uuid,
-    pub placeholder: bool,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct WalletReader {
+    pub addr_salts: Vec<String>,
     pub idx_addr: u32,
     pub passphrase: String,
     pub salt: String,
 }
 
-// TODO: alphabetic order & docs
 impl Wallet {
     // Constructor
     pub fn new(mnemonics: Vec<String>, uid: Uuid, password: &str) -> Result<Self, Box<dyn Error>> {
@@ -99,7 +216,7 @@ impl Wallet {
         let cipher = Cipher::camellia_256_cbc();
 
         // passphrase
-        let salt = Self::gen_salt();
+        let salt = gen_salt(12);
         let passphrase = Self::get_passphrase(&mnemonics, &salt);
 
         // grep keys and do fancy stuff with it
@@ -110,32 +227,21 @@ impl Wallet {
 
         // construct
         let wallet = Wallet {
-            passphrase,
+            addr_salts: Vec::new(),
+            idx_addr: 0,
+            placeholder: false,
             pub_key,
+            passphrase,
             priv_key,
             salt,
-            idx_addr: 0,
             uid,
-            placeholder: false,
         };
         // store keys
         let _ = wallet.save(password);
         Ok(wallet)
     }
 
-    /// Construct a new wallet without any initializations unlike Self::new().
-    pub fn placeholder() -> Self {
-        Wallet {
-            passphrase: String::new(),
-            pub_key: Vec::new(),
-            priv_key: Vec::new(),
-            salt: String::new(),
-            idx_addr: 0,
-            uid: Uuid::new_v4(),
-            placeholder: true,
-        }
-    }
-
+    /// Get wallet by uuid and password.
     pub fn from(uid: Uuid, password: &str) -> Result<Wallet, Box<dyn Error>> {
         // public key - read file
         let mut f = match File::open(format!("{}/pub_key_{}", KEY_PATH, uid)) {
@@ -208,12 +314,13 @@ impl Wallet {
         // construct wallet
         Ok(Wallet {
             idx_addr: json.idx_addr,
+            placeholder: false,
+            addr_salts: json.addr_salts,
             passphrase: json.passphrase,
             priv_key,
             pub_key,
             salt: json.salt,
             uid,
-            placeholder: false,
         })
     }
 
@@ -222,23 +329,25 @@ impl Wallet {
         format!("{:x}", Sha256::digest(passphrase.as_bytes()))
     }
 
-    /// Generate a salt.
-    fn gen_salt() -> String {
-        let mut out: Vec<String> = Vec::new();
-        for _ in 0..12 {
-            let i: u16 = Rng::gen(&mut thread_rng());
-            let c = match char::from_u32(i as u32) {
-                Some(n) => n,
-                None => continue,
-            };
-            out.push(c.to_string());
+    /// Construct a new wallet without any initializations unlike Self::new().
+    pub fn placeholder() -> Self {
+        Wallet {
+            idx_addr: 0,
+            placeholder: true,
+            addr_salts: Vec::new(),
+            passphrase: String::new(),
+            priv_key: Vec::new(),
+            pub_key: Vec::new(),
+            salt: String::new(),
+            uid: Uuid::new_v4(),
         }
-        out.concat()
     }
 
+    /// Save the keys and the wallet data.
     pub fn save(&self, password: &str) -> Result<(), Box<dyn Error>> {
         // wallet
         let wallet = json!({
+            "addr_salts": self.addr_salts,
             "idx_addr": self.idx_addr,
             "passphrase": self.passphrase,
             "salt": self.salt,
@@ -342,52 +451,85 @@ impl Wallet {
         }
         Ok(())
     }
-
-    /// Generate an address based on the index.
-    pub fn gen_address(&mut self, idx: u32) -> String {
-        // hash public key
-        let a = Sha512::digest(self.pub_key.clone());
-        let mut a = a.to_vec();
-
-        // append unique & critical information
-        a.append(&mut self.salt.as_bytes().to_vec());
-        a.append(&mut self.passphrase.as_bytes().to_vec());
-        a.append(&mut idx.to_be_bytes().to_vec());
-
-        let b = Sha512::digest(a);
-        let c = Sha256::digest(b);
-
-        // calculate checksum
-        let d = Sha256::digest(c);
-        let mut checksum = d[0..8].to_vec();
-
-        // append checksum
-        let mut c = c.to_vec();
-        c.append(&mut checksum);
-
-        // encode address
-        let f = bs58::encode(&c).into_string();
-
-        // update amount of addresses
-        if idx > self.idx_addr {
-            self.idx_addr = idx;
-        }
-        f
-    }
-
-    // TODO: don't hardcode this shit
-    fn get_transactions(&self, addresses: Vec<String>) {
-        let req = Request {
-            dtype: Dtype::GetTransactions,
-            data: addresses,
-            addr: String::new(),
-        };
-        let stream = request("127.0.0.1:8000", &req);
-        let res = receive(stream);
-        // TODO: YOU STOPPED HERE
-    }
 }
 
+/// Convert address to pattern.
+pub fn addr_to_pattern(addr: &str) -> Vec<u8> {
+    let out: Vec<u8> = addr.bytes().map(|x| x % 2).collect();
+    out
+}
+
+/// Calculate the fee of a transaction by it's value.
+pub fn calc_fee(val: f64) -> f64 {
+    let fee = *unsafe { FEE.get().unwrap() };
+    let fee = fee as f64;
+    val * (fee / 100.0)
+}
+
+/// Validate an address.
+pub fn check_addr_by_key(addr: &str, pub_key: &Vec<u8>) -> bool {
+    // check length
+    if !check_addr_len(addr) {
+        return false;
+    }
+    // decode address
+    let decoded = match bs58::decode(addr).into_vec() {
+        Ok(n) => n,
+        Err(e) => {
+            output(&format!(
+                "Transaction::check_address - validate address error: {}",
+                e,
+            ));
+            return false;
+        }
+    };
+    // extract salt & index
+    let salt = String::from_utf8_lossy(&decoded[21..33]).to_string();
+    let idx: u32 = match String::from_utf8_lossy(&decoded[33..]).parse() {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!(" [#]  parse index error: {}", e);
+            return false;
+        }
+    };
+    // validate address
+    if gen_address(pub_key, idx, &salt) != addr {
+        eprintln!(
+            "not equal: {:?} - idx:{:?} - salt:{:?} - key:{:?}",
+            gen_address(pub_key, idx, &salt),
+            idx,
+            salt,
+            pub_key
+        );
+        return false;
+    }
+    true
+}
+
+/// Check address by checksum.
+pub fn check_addr_by_sum(addr: &str) -> bool {
+    // check length
+    if !check_addr_len(addr) {
+        return false;
+    }
+    // decode address
+    let decoded = match bs58::decode(addr).into_vec() {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("validate address error: {}", e);
+            return false;
+        }
+    };
+    // compare checksums
+    Sha224::digest(&decoded[5..])[..5] == decoded[..5]
+}
+
+/// Check length of address.
+pub fn check_addr_len(addr: &str) -> bool {
+    addr.as_bytes().len() > 46
+}
+
+/// Check if a user already has a wallet.
 pub fn check_wallet_exists(uid: Uuid) -> bool {
     match fs::File::open(format!("{}/{}", WALLET_PATH, uid)) {
         Ok(_) => true,
@@ -395,6 +537,20 @@ pub fn check_wallet_exists(uid: Uuid) -> bool {
     }
 }
 
+/// Decrypt data using a password.
+pub fn decrypt(password: &str, data: &[u8]) -> Result<Vec<u8>, aes_gcm::Error> {
+    let p = Sha256::digest(password);
+    let key = Key::<Aes256Gcm>::from_slice(&p);
+    let (data, nonce) = data.split_at(data.len() - 12);
+    let nonce = Nonce::from_slice(nonce);
+    let cipher = Aes256Gcm::new(key);
+    match cipher.decrypt(&nonce, data) {
+        Ok(n) => Ok(n),
+        Err(e) => Err(e),
+    }
+}
+
+/// Encrypt data using a password.
 pub fn encrypt(password: &str, data: &str) -> Result<Vec<u8>, aes_gcm::Error> {
     let p = Sha256::digest(password);
     let key = Key::<Aes256Gcm>::from_slice(&p);
@@ -410,14 +566,153 @@ pub fn encrypt(password: &str, data: &str) -> Result<Vec<u8>, aes_gcm::Error> {
     }
 }
 
-pub fn decrypt(password: &str, data: &[u8]) -> Result<Vec<u8>, aes_gcm::Error> {
-    let p = Sha256::digest(password);
-    let key = Key::<Aes256Gcm>::from_slice(&p);
-    let (data, nonce) = data.split_at(data.len() - 12);
-    let nonce = Nonce::from_slice(nonce);
-    let cipher = Aes256Gcm::new(key);
-    match cipher.decrypt(&nonce, data) {
-        Ok(n) => Ok(n),
-        Err(e) => Err(e),
+/// Generate an address.
+/// Structure: `{checksum 4}:{hash 32}:{salt 4}:{index}`
+pub fn gen_address(pub_key: &Vec<u8>, idx: u32, salt: &String) -> String {
+    // hash public key
+    let mut a = Sha512::digest(pub_key).to_vec();
+    let mut b = a.clone();
+
+    // append salt & index for uniqueness
+    b.extend_from_slice(format!("{}{}", salt, idx).as_bytes());
+    a.extend_from_slice(&Sha512::digest(&b));
+
+    // hash again
+    let mut c = md5::compute(Sha256::digest(&a[32..96])).to_vec();
+    c.extend_from_slice(format!("{}{}", salt, idx).as_bytes());
+
+    // checksum
+    let checksum = &Sha224::digest(&c)[..5];
+    let mut result = checksum.to_vec();
+    result.extend_from_slice(&c);
+
+    // encode address
+    let f = bs58::encode(result).into_string();
+    f
+}
+
+/// Generate a salt.
+pub fn gen_salt(len: usize) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for _ in 0..len {
+        let i: u16 = Rng::gen(&mut thread_rng());
+        let c = match char::from_u32(i as u32) {
+            Some(n) => n,
+            None => continue,
+        };
+        out.push(c.to_string());
     }
+    out.concat()
+}
+
+pub fn get_balance(addr: &str) -> Result<f64, Box<dyn Error>> {
+    let transactions = match get_transactions(addr) {
+        Ok(n) => n,
+        Err(e) => return Err(e),
+    };
+    let mut value = 0_f64;
+    for tx in transactions {
+        if tx.src == addr.to_string() {
+            value -= tx.val + tx.fee;
+        } else if &tx.dst == addr {
+            value += tx.val;
+        }
+    }
+    Ok(value)
+}
+
+/// Get the timestamp by human notation.
+/// Example:
+/// 2m:3h:5d:2w - valid after 2 minutes, 3 hours, 5 days, 2 weeks
+pub fn get_timestamp(syntax: &str) -> Result<i64, Box<dyn Error>> {
+    let syntax = syntax.to_string();
+    if syntax.len() < 3 {
+        return Ok(0);
+    }
+    let mut out = 0_i64;
+    for i in syntax.split(':') {
+        let (multi, t) = i.split_at(i.len() - 1);
+        let multi: i64 = match multi.parse() {
+            Ok(n) => n,
+            Err(e) => return Err(Box::new(e)),
+        };
+        match t {
+            "m" => out += 60 * multi,
+            "h" => out += 60 * 60 * multi,
+            "d" => out += 60 * 60 * 24 * multi,
+            "w" => out += 60 * 60 * 24 * 7 * multi,
+            _ => (),
+        }
+    }
+    Ok(out)
+}
+
+pub fn get_transactions(addr: &str) -> Result<Vec<Transaction>, Box<dyn Error>> {
+    // craft request
+    let req = Request {
+        dtype: Dtype::GetTransactions,
+        data: json!(addr_to_pattern(addr)).to_string(),
+        addr: String::new(),
+    };
+    // send request
+    let stream = match request(unsafe { ADDRESS.get().unwrap() }, &req) {
+        Ok(n) => n,
+        Err(e) => {
+            output(&format!("get_transactions - request error: {}", e));
+            return Err(e);
+        }
+    };
+    // receive transactions
+    let res = match receive::<Vec<Transaction>>(stream) {
+        Ok(n) => n,
+        Err(e) => {
+            output(&format!("get_transactions - receive error: {}", e));
+            return Err(e);
+        }
+    };
+    // filter transactions
+    let mut transactions: Vec<Transaction> = Vec::new();
+    for tx in res.res {
+        if tx.src.contains(&addr.to_string()) || tx.dst == addr {
+            transactions.push(tx);
+        }
+    }
+    Ok(transactions)
+}
+
+/// Request fee percentage from node and `None` if the value was invalid.
+pub fn request_fee() -> Result<Option<u8>, Box<dyn Error>> {
+    // craft request
+    let req = Request {
+        dtype: Dtype::GetFee,
+        data: "",
+        addr: String::new(),
+    };
+    // send request
+    let stream = match request(unsafe { ADDRESS.get().unwrap() }, &req) {
+        Ok(n) => n,
+        Err(e) => {
+            output(&format!("request_fee - request error: {}", e));
+            return Err(e);
+        }
+    };
+    // receive response
+    let res = match receive::<u8>(stream) {
+        Ok(n) => n,
+        Err(e) => {
+            output(&format!("request_fee - receive error: {}", e));
+            return Err(e);
+        }
+    };
+    // check fee
+    if res.res > 100 {
+        Ok(None)
+    } else {
+        Ok(Some(res.res))
+    }
+}
+
+/// Returns the current timestamp.
+pub fn timestamp_now() -> i64 {
+    Utc::now().timestamp()
 }

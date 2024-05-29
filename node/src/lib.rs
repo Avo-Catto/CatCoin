@@ -46,6 +46,10 @@ pub mod share {
         /// blocks until halving
         #[arg(long, default_value_t = 100)]
         halving: u64,
+
+        /// percentage of fee
+        #[arg(short, long, default_value_t = 5)]
+        fee: u8,
     }
 
     #[derive(Debug)]
@@ -59,6 +63,7 @@ pub mod share {
         pub wallet: String,
         pub reward: f64,
         pub halving: u64,
+        pub fee: u8,
     }
     impl Args_ {
         /// Return the necessary information for synchronization as json.
@@ -68,6 +73,7 @@ pub mod share {
                 "tx_per_block": self.tx_per_block,
                 "reward": self.reward,
                 "halving": self.halving,
+                "fee": self.fee,
             })
         }
     }
@@ -75,6 +81,7 @@ pub mod share {
     pub static mut ARGS: OnceLock<Args_> = OnceLock::new();
     pub static ADDR: OnceLock<String> = OnceLock::new();
     pub static COINBASE: OnceLock<String> = OnceLock::new();
+    pub static FEE: OnceLock<u8> = OnceLock::new();
 
     fn parse_args() -> Args_ {
         let args = Args::parse();
@@ -85,9 +92,10 @@ pub mod share {
             entry: args.entry,
             difficulty: args.difficulty,
             tx_per_block: args.txpb,
-            wallet: String::from("9Jdoux3vuwqMu5zUBkxCCDfpCoxb7tyKzmJwZoVkrfS32VeRFBUobQs"), // DEBUG TODO args.wallet,
+            wallet: args.wallet,
             reward: args.reward,
             halving: args.halving,
+            fee: args.fee,
         }
     }
 
@@ -95,15 +103,23 @@ pub mod share {
         unsafe {
             // get args
             ARGS.get_or_init(|| parse_args());
+            let args = ARGS.get().unwrap();
 
             // check args
-            if ARGS.get().unwrap().difficulty < 1 || ARGS.get().unwrap().difficulty > 71 {
+            if args.difficulty < 1 || args.difficulty > 71 {
                 eprintln!("[#] ARGS - invalid difficulty (allowed: 1 - 71)");
+                exit(1);
+            }
+            if args.fee > 100 {
+                eprintln!("[#] ARGS - invalid fee (allowed: 0% - 100%)");
                 exit(1);
             }
             // TODO: check if wallet address is valid
             // format address
-            ADDR.get_or_init(|| format!("{}:{}", ARGS.get().unwrap().ip, ARGS.get().unwrap().port));
+            ADDR.get_or_init(|| format!("{}:{}", args.ip, args.port));
+
+            // set fee
+            FEE.get_or_init(|| args.fee);
         }
 
         // set coinbase address

@@ -2,12 +2,16 @@ extern crate node;
 extern crate num_bigint;
 extern crate rand;
 extern crate serde_json;
-use node::{blockchain::*, comm::*, share, utils::*};
+use node::{
+    blockchain::*,
+    comm::*,
+    share::{self, FEE},
+    utils::*,
+};
 use num_bigint::BigUint;
 use rand::{seq::SliceRandom, thread_rng};
 use serde_json::json;
 use std::{
-    convert::TryInto,
     io::Read,
     net::{Shutdown, TcpListener},
     process::exit,
@@ -225,13 +229,18 @@ fn main() {
                             *peers = subtract_vec(peers.to_vec(), failed);
                         }
                     }
-                    // check transaction
-                    match transaction.validate() {
-                        Ok(_) => {}
-                        Err(e) => {
-                            respond(&stream, AddTransactionResponse::FailedCheck);
-                            eprintln!("[#] DTYPE:AddTransaction - check failed: {:?}", e);
-                            return;
+                    // update fee
+                    let mut transaction = transaction.clone();
+                    transaction.fee = calc_fee(transaction.val);
+                    {
+                        // check transaction
+                        match transaction.validate(&blockchain.lock().unwrap()) {
+                            Ok(_) => {}
+                            Err(e) => {
+                                respond(&stream, AddTransactionResponse::FailedCheck);
+                                eprintln!("[#] DTYPE:AddTransaction - check failed: {:?}", e);
+                                return;
+                            }
                         }
                     }
                     // add transaction to pool
@@ -408,13 +417,15 @@ fn main() {
                     respond(&stream, blocks);
                 }
 
+                Dtype::GetFee => respond(&stream, FEE.get().unwrap()),
+
                 Dtype::GetPoolHash => match merkle_hash(
                     transactionpool
                         .lock()
                         .unwrap()
                         .pool
                         .iter()
-                        .map(|x| x.hash.clone())
+                        .map(|x| hash_str(x.to_string().as_bytes()))
                         .collect(),
                 ) {
                     Some(n) => respond(&stream, n),
@@ -427,36 +438,14 @@ fn main() {
 
                 Dtype::GetTransactions => {
                     // parse received patterns
-                    let pattern_strings: Vec<String> = match request.data.parse() {
+                    let patterns: Vec<Vec<u8>> = match serde_json::from_str(&request.data) {
                         Ok(n) => n,
                         Err(e) => {
-                            eprintln!("[#] DTYPE:GetTransactions - parse to Vec<String> error");
+                            eprintln!("[#] DTYPE:GetTransactions - parse error: {}", e);
                             respond::<Vec<Transaction>>(&stream, Vec::new());
+                            return;
                         }
                     };
-                    // parse each pattern
-                    let mut patterns: Vec<Vec<u8>> = Vec::new();
-                    for i in pattern_strings {
-                        let mut err = false;
-                        let pattern: Vec<u8> = request
-                            .data
-                            .chars()
-                            .map(|x| match u8::from_str(&x.to_string()) {
-                                Ok(n) => n,
-                                Err(_) => {
-                                    err = true;
-                                    0
-                                }
-                            })
-                            .collect();
-                        patterns.push(pattern);
-                    }
-                    // check if error occurred
-                    if err {
-                        eprintln!("[#] DTYPE:GetTransactions - parse to u8 error");
-                        respond::<Vec<Transaction>>(&stream, Vec::new());
-                        return;
-                    }
                     // search for transactions using the patterns
                     let chain = { blockchain.lock().unwrap().clone() };
                     respond(&stream, chain.get_txs_by_sig(patterns))
@@ -519,12 +508,14 @@ fn main() {
                         }
                     }
                     // check block
-                    match block.validate() {
-                        Ok(_) => println!("[+] DTYPE:PostBlock - block valid"),
-                        Err(e) => {
-                            respond(&stream, PostBlockResponse::ValidationError);
-                            eprintln!("[#] DTYPE:PostBlock - block invalid: {:?}", e);
-                            return;
+                    {
+                        match block.validate(&blockchain.lock().unwrap()) {
+                            Ok(_) => println!("[+] DTYPE:PostBlock - block valid"),
+                            Err(e) => {
+                                respond(&stream, PostBlockResponse::ValidationError);
+                                eprintln!("[#] DTYPE:PostBlock - block invalid: {:?}", e);
+                                return;
+                            }
                         }
                     }
                     {

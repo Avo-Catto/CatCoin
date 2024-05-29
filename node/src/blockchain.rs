@@ -8,17 +8,17 @@ use crate::{
     utils::*,
 };
 use bs58;
+use openssl::{error::ErrorStack, hash::MessageDigest, pkey::PKey, sign::Verifier};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use std::{
     any::Any,
     error::Error,
     io::{BufReader, BufWriter, Read, Write},
     panic::catch_unwind,
     process::{Child, Command, Stdio},
-    str::{Bytes, FromStr},
+    str::FromStr,
     sync::{mpsc, Arc, Mutex, TryLockError},
     thread,
     time::Duration,
@@ -37,41 +37,19 @@ pub struct Block {
     hash_str: String,
 }
 
-impl PartialEq for Block {
-    fn eq(&self, block: &Self) -> bool {
-        // compare essential parts of block
-        if ![
-            self.index.to_string(),
-            self.previous_hash.clone(),
-            self.merkle.clone(),
-        ]
-        .iter()
-        .zip([
-            block.index.to_string(),
-            block.previous_hash.clone(),
-            block.merkle.clone(),
-        ])
-        .all(|(x, y)| x.to_owned() == y.to_owned())
-        {
-            return false;
-        }
-        // compare timestamp with deviation
-        let dev = 60 * 5;
-        if !((self.timestamp - dev)..(self.timestamp + dev)).contains(&block.timestamp) {
-            return false;
-        }
-        true
-    }
-}
-
 impl Block {
     /// Constructor
     pub fn new(index: u64, transactions: Vec<Transaction>, prev_hash: String) -> Block {
         // get timestamp and calculate merkle hash
         let timestamp = timestamp_now();
         let merkle: String = if transactions.len() > 1 {
-            merkle_hash(transactions[1..].iter().map(|x| x.hash.clone()).collect())
-                .expect("Block::new().merkle_hash failed")
+            merkle_hash(
+                transactions[1..]
+                    .iter()
+                    .map(|x| hash_str(x.to_string().as_bytes()))
+                    .collect(),
+            )
+            .expect("Block::new().merkle_hash failed")
         } else {
             String::new()
         };
@@ -100,7 +78,7 @@ impl Block {
     /// Performs regex checks on the properties of the block, recalculates it's hashes and
     /// validates its transactions.
     // TODO: validate coinbase transaction
-    pub fn validate(&self) -> Result<(), BlockError> {
+    pub fn validate(&self, chain: &BlockChain) -> Result<(), BlockError> {
         // check if values of block are valid using regex
         let sha256_re = Regex::new("^[a-fA-F0-9]{64}$").unwrap();
 
@@ -114,7 +92,7 @@ impl Block {
         }
         // check transactions
         for t in &self.transactions {
-            match t.validate() {
+            match t.validate(chain) {
                 Ok(()) => continue,
                 Err(e) => {
                     println!("transaction invalid: {:?}", e);
@@ -127,7 +105,7 @@ impl Block {
             merkle_hash(
                 self.transactions[1..]
                     .iter()
-                    .map(|x| x.hash.clone())
+                    .map(|x| hash_str(x.to_string().as_bytes()))
                     .collect(),
             )
             .expect("Block::validate().merkle_hash failed")
@@ -216,6 +194,33 @@ impl std::fmt::Display for Block {
     }
 }
 
+impl PartialEq for Block {
+    fn eq(&self, block: &Self) -> bool {
+        // compare essential parts of block
+        if ![
+            self.index.to_string(),
+            self.previous_hash.clone(),
+            self.merkle.clone(),
+        ]
+        .iter()
+        .zip([
+            block.index.to_string(),
+            block.previous_hash.clone(),
+            block.merkle.clone(),
+        ])
+        .all(|(x, y)| x.to_owned() == y.to_owned())
+        {
+            return false;
+        }
+        // compare timestamp with deviation
+        let dev = 60 * 5;
+        if !((self.timestamp - dev)..(self.timestamp + dev)).contains(&block.timestamp) {
+            return false;
+        }
+        true
+    }
+}
+
 #[derive(Clone)]
 pub struct BlockChain {
     chain: Vec<Block>,
@@ -232,10 +237,7 @@ impl BlockChain {
     }
 
     /// Construct the blockchain with a genisis block.
-    // TODO: add coinbase transaction + coinbase wallet is set by genisis block
     pub fn new_with_genisis() -> BlockChain {
-        // coinbase transactions
-
         // new chain & genisis block
         let mut chain = Self::new();
         let mut genisis_block = Block::new(0, vec![], String::new());
@@ -328,12 +330,31 @@ impl BlockChain {
         }
     }
 
+    /// Get amount of coins of an address.
+    pub fn get_balance(&self, addr: &str) -> Result<f64, Box<dyn Error>> {
+        // get balance
+        let mut value = 0_f64;
+        for block in self.get_chain() {
+            for tx in block.transactions {
+                if tx.src == addr {
+                    value -= tx.val + tx.fee;
+                } else if &tx.dst == addr {
+                    value += tx.val;
+                }
+            }
+        }
+        Ok(value)
+    }
+
     /// Returns a list of transactions where the source address matches a specific pattern.
+    // TODO: rename to *_pat & make it only take one pattern, not a vec
     pub fn get_txs_by_sig(&self, patterns: Vec<Vec<u8>>) -> Vec<Transaction> {
         let mut out: Vec<Transaction> = Vec::new();
         for block in self.get_chain() {
             for transaction in block.transactions {
-                if patterns.contains(&addr_to_pattern(&transaction.src)) {
+                if patterns.contains(&addr_to_pattern(&transaction.src))
+                    || patterns.contains(&addr_to_pattern(&transaction.dst))
+                {
                     out.push(transaction)
                 }
             }
@@ -501,13 +522,12 @@ impl MineController {
     // TODO: compile miner
     /// Construct the command to run the miner.
     fn command(start: u64, difficulty: u8, block: Block) -> Result<Child, std::io::Error> {
-        // format data
-        let plain = format!(
-            "{{\"start\":{},\"difficulty\":{},\"block\":{}}}",
-            start,
-            difficulty,
-            block.as_json()
-        );
+        let plain = json!({
+            "start": start,
+            "difficulty": difficulty,
+            "block": block.as_json(),
+        })
+        .to_string();
         Command::new("cargo")
             .args(["run", "--bin", "miner", "-q", "--", &STANDARD.encode(plain)])
             .stdin(Stdio::piped())
@@ -548,7 +568,14 @@ impl MineController {
         let reward = get_blockreward(idx);
 
         // coinbase transaction
-        let mut transactions = vec![Transaction::get_coinbase(reward)];
+        let coinbase_tx = match Transaction::get_coinbase(reward) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[#] MINECONTROLLER - get coinbase transaction error: {}", e);
+                return Ok(false);
+            }
+        };
+        let mut transactions = vec![coinbase_tx];
 
         // flush pool
         let mut transactions_ = match pool.flush() {
@@ -697,6 +724,7 @@ impl MineController {
                             break None;
                         }
                     };
+                    // TODO: add fees to coinbase transaction
                     // update block
                     block.nonce = json.nonce;
                     block.hash = json.hash;
@@ -708,13 +736,14 @@ impl MineController {
                     break;
                 }
                 let block = block.unwrap();
-
-                // validate block
-                match block.validate() {
-                    Ok(_) => println!("[+] MINER - nonce found: {}", block.nonce),
-                    Err(e) => {
-                        eprintln!("[#] MINER - block invalid: {:?}", e);
-                        break;
+                {
+                    // validate block
+                    match block.validate(&self_arc.blockchain.lock().unwrap()) {
+                        Ok(_) => println!("[+] MINER - nonce found: {}", block.nonce),
+                        Err(e) => {
+                            eprintln!("[#] MINER - block invalid: {:?}", e);
+                            break;
+                        }
                     }
                 }
                 {
@@ -972,31 +1001,35 @@ impl MineController {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Transaction {
-    pub src: String,
-    pub dst: String,
-    pub timestamp: i64,
-    pub val: f64,
-    pub broadcast: bool,
-    pub hash: String,
+    pub src: String,        // Address of sender
+    pub dst: String,        // Address of receiver
+    pub val: f64,           // Amount of coins
+    pub timestamp: i64,     // when transaction will be valid
+    pub signature: Vec<u8>, // signature
+    pub pub_key: Vec<u8>,   // public key
+    pub broadcast: bool,    // should the transaction be broadcasted - always true
+    pub fee: f64,           // Address of node to receive it's fees
 }
 
 impl Transaction {
-    /// Contstructor
-    pub fn new(src: &str, dst: &str, val: f64, broadcast: bool) -> Transaction {
-        let timestamp = timestamp_now();
-        let hash_fmt = format!("{}${}${}${}", src, dst, timestamp, val);
-
-        // construct transaction
-        Transaction {
-            src: String::from_str(src).unwrap(),
-            dst: String::from_str(dst).unwrap(),
-            timestamp,
+    // Constructor
+    pub fn new(src: &str, dst: &str, val: f64, after: &str) -> Result<Self, Box<dyn Error>> {
+        let add = match get_timestamp(after) {
+            Ok(n) => n,
+            Err(e) => return Err(e),
+        };
+        Ok(Transaction {
+            src: src.to_string(),
+            dst: dst.to_string(),
             val,
-            broadcast,
-            hash: hash_str(hash_fmt.as_bytes()),
-        }
+            timestamp: timestamp_now() + add,
+            signature: Vec::new(),
+            pub_key: Vec::new(),
+            broadcast: false,
+            fee: calc_fee(val),
+        })
     }
 
     /// Json representation of the transaction.
@@ -1004,97 +1037,176 @@ impl Transaction {
         json!({
             "src": self.src,
             "dst": self.dst,
-            "timestamp": self.timestamp,
             "val": self.val,
+            "timestamp": self.timestamp,
+            "signature": self.signature,
+            "pub_key": self.pub_key,
             "broadcast": self.broadcast,
-            "hash": self.hash,
+            "fee": self.fee,
         })
     }
 
-    /// Validate an address.
-    fn check_address(addr: &str) -> bool {
-        // decode address
-        let decoded_addr = match bs58::decode(addr).into_vec() {
+    /// Check signature.
+    fn check_sign(&self) -> Result<bool, ErrorStack> {
+        // load public key
+        let pkey = match PKey::public_key_from_pem(&self.pub_key) {
             Ok(n) => n,
-            Err(e) => {
-                eprintln!("[#] validate address error: {}", e);
-                return false;
-            }
+            Err(e) => return Err(e),
         };
-        // check length
-        if decoded_addr.len() != 40 {
+        // construct verifier
+        let verifier = match Verifier::new(MessageDigest::sha1(), &pkey) {
+            Ok(n) => n,
+            Err(e) => return Err(e),
+        };
+        // verify
+        verifier.verify(&self.signature)
+    }
+
+    /// Validate an address.
+    fn check_src(&self) -> bool {
+        // decode address
+        let mut decoded = match bs58::decode(&self.src).into_vec() {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        // extract index & salt
+        decoded.reverse();
+        let mut res = decoded.split(|x| char::from_u32(*x as u32) == Some(':'));
+        let salt = match res.next() {
+            Some(n) => String::from_utf8_lossy(n).to_string(),
+            None => return false,
+        };
+        let idx = match res.next() {
+            Some(n) => match String::from_utf8(n.to_vec()) {
+                Ok(n) => match n.parse() {
+                    Ok(n) => n,
+                    Err(_) => return false,
+                },
+                Err(_) => return false,
+            },
+            None => return false,
+        };
+        decoded.reverse();
+
+        // validate address
+        if self.src != gen_address(&self.pub_key, idx, &salt) {
             return false;
         }
-        // validate checksum
-        let checksum = &decoded_addr.clone()[32..decoded_addr.len()];
-        let c = Sha256::digest(&decoded_addr[..32]);
-        let foo = &c[0..8];
-        checksum == foo
+        true
     }
 
     /// Generate the coinbase transaction.
-    pub fn get_coinbase(reward: f64) -> Self {
+    pub fn get_coinbase(reward: f64) -> Result<Self, Box<dyn Error>> {
         let wallet = unsafe { &ARGS.get().unwrap().wallet };
-        let addr = COINBASE.get().unwrap();
-        Transaction::new(addr, &wallet, reward, false)
+        let addr = COINBASE.get().unwrap().to_string();
+        let transaction = match Transaction::new(&addr, &wallet, reward, "") {
+            Ok(n) => n,
+            Err(e) => return Err(e),
+        };
+        Ok(transaction)
     }
 
     /// Construct a transaction from json.
     pub fn from_json(json: &serde_json::Value) -> Result<Transaction, Box<dyn Any + Send>> {
-        let transaction = catch_unwind(|| {
-            let mut transaction = Self::new(
-                json.get("src")
+        catch_unwind(|| {
+            // initial data
+            Transaction {
+                src: json
+                    .get("src")
                     .expect("Transaction::from_json: src")
-                    .as_str()
-                    .expect("Transaction::from_json: src as str"),
-                json.get("dst")
+                    .as_array()
+                    .expect("Transaction::from_json: src as array")
+                    .iter()
+                    .map(|x| x.to_string())
+                    .collect(),
+                dst: json
+                    .get("dst")
                     .expect("Transaction::from_json: dst")
-                    .as_str()
-                    .expect("Transaction::from_json: dst as str"),
-                json.get("val")
+                    .to_string()
+                    .replace('"', ""),
+                val: json
+                    .get("val")
                     .expect("Transaction::from_json: val")
                     .as_f64()
                     .expect("Transaction::from_json: val as f64"),
-                json.get("broadcast")
+                timestamp: json
+                    .get("timestamp")
+                    .expect("Transaction::from_json: timestamp")
+                    .as_i64()
+                    .expect("Transaction::from_json: timestamp as i64"),
+                signature: json
+                    .get("signature")
+                    .expect("Transaction::from_json: signature")
+                    .as_array()
+                    .expect("Transaction::from_json: signature as array")
+                    .iter()
+                    .map(|x| {
+                        x.as_u64()
+                            .expect("Transaction::from_json: signature value as u64")
+                            as u8
+                    })
+                    .collect(),
+                pub_key: json
+                    .get("pub_key")
+                    .expect("Transaction::from_json: public key")
+                    .as_array()
+                    .expect("Transaction::from_json: public key as array")
+                    .iter()
+                    .map(|x| {
+                        x.as_u64()
+                            .expect("Transaction::from_json: public key value as u64")
+                            as u8
+                    })
+                    .collect(),
+                broadcast: json
+                    .get("broadcast")
                     .expect("Transaction::from_json: broadcast")
                     .as_bool()
                     .expect("Transaction::from_json: broadcast as bool"),
-            );
-            transaction.timestamp = json
-                .get("timestamp")
-                .expect("Transaction::from_json: timestamp")
-                .as_i64()
-                .expect("Transaction::from_json: timestamp as i64");
-            transaction.hash = json
-                .get("hash")
-                .expect("Transaction::from_json: hash")
-                .to_string()
-                .replace("\"", "");
-            transaction
-        });
-        transaction
+                fee: json
+                    .get("fee")
+                    .expect("Trnasaction::from_json: fee")
+                    .as_f64()
+                    .expect("Transaction::from_json: fee as f64"),
+            }
+        })
     }
 
-    /// Recalculate the hash of the transaction and return it.
-    fn recalc_hash(&self) -> String {
-        let hash_fmt = format!("{}${}${}${}", self.src, self.dst, self.timestamp, self.val);
-        hash_str(hash_fmt.as_bytes())
-    }
-
-    /// Performs regex checks on the properties of the transaction and recalculates its hash.
-    // TODO: check if address even have enough coins
-    pub fn validate(&self) -> Result<(), TVE> {
+    // TODO: needs huge improvements + check fee
+    /// Check entire transaction.
+    pub fn validate(&self, chain: &BlockChain) -> Result<(), TVE> {
         // check source
-        if !Self::check_address(&self.src) {
+        if !self.check_src() {
             return Err(TVE::InvalidSource);
         }
         // check destination
-        if !Self::check_address(&self.dst) {
-            return Err(TVE::InvalidDestination);
+        // TODO: do a simple regex check and check for length
+        // check value
+        if self.val < 0.0 {
+            return Err(TVE::InvalidValue);
         }
-        // check hash
-        if self.recalc_hash() != self.hash {
-            return Err(TVE::MismatchHash);
+        // check balance
+        let balance = match chain.get_balance(&self.src) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[#] TRANSACTION:validate - retrieve balance error: {}", e);
+                return Err(TVE::BalanceError);
+            }
+        };
+        if balance < self.val + self.fee {
+            return Err(TVE::InvalidBalance);
+        }
+        // check signature
+        match self.check_sign() {
+            Ok(n) => {
+                if !n {
+                    return Err(TVE::InvalidSignature);
+                }
+            }
+            Err(e) => {
+                eprintln!("[#] TRANSACTION:validate - check signature error: {}", e);
+                return Err(TVE::SignatureError);
+            }
         }
         Ok(())
     }
@@ -1104,9 +1216,36 @@ impl std::fmt::Display for Transaction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "\t- Source: {}\n\t- Destination: {}\n\t- Timestamp: {}\n\t- Value: {}\n\t- Hash: {}\n",
-            self.src, self.dst, self.timestamp, self.val, self.hash
+            "\t- Source: {}\n\t- Destination: {}\n\t- Timestamp: {}\n\t- Value: {}\n\t- Fee: {}\n",
+            self.src, self.dst, self.timestamp, self.val, self.fee
         )
+    }
+}
+impl PartialEq for Transaction {
+    fn eq(&self, other: &Self) -> bool {
+        // compare essential parts of transaction
+        if ![
+            self.src.clone(),
+            self.dst.clone(),
+            self.val.to_string(),
+            self.timestamp.to_string(),
+        ]
+        .iter()
+        .zip([
+            other.src.clone(),
+            other.dst.clone(),
+            other.val.to_string(),
+            other.timestamp.to_string(),
+        ])
+        .all(|(x, y)| x.to_owned() == y.to_owned())
+            || ![self.signature.clone(), self.pub_key.clone()]
+                .iter()
+                .zip([other.signature.clone(), other.pub_key.clone()])
+                .all(|(x, y)| x.to_owned() == y.to_owned())
+        {
+            return false;
+        }
+        true
     }
 }
 
@@ -1131,11 +1270,8 @@ impl TransactionPool {
         if self.pool.contains(transaction) {
             return Err(PoolError::DuplicatedTransaction);
         }
-        match transaction.validate() {
-            Ok(_) => (),
-            Err(_) => return Err(PoolError::InvalidTransaction),
-        }
-        self.pool.push(transaction.clone()); // add transaction to pool
+        // add transaction to pool
+        self.pool.push(transaction.clone());
         Ok(())
     }
 
@@ -1152,7 +1288,11 @@ impl TransactionPool {
             None => return Err(SyncError::InvalidValue),
         };
         // get merkle hash of local transactionpool
-        let hashes_local: Vec<String> = self.pool.iter().map(|x| x.hash.clone()).collect();
+        let hashes_local: Vec<String> = self
+            .pool
+            .iter()
+            .map(|x| hash_str(x.to_string().as_bytes()))
+            .collect();
         let hash_local = match merkle_hash(hashes_local) {
             Some(n) => n,
             None => String::new(),

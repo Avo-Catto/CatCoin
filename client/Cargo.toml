@@ -13,7 +13,9 @@ aes-gcm = "0.10.3"
 serde_json = "1.0.117"
 serde = "1.0.202"
 chrono = "0.4.38"
-node = "0.1.0"
+node = { path = "../node" }
+rpassword = "7.3.1"
+md5 = "0.7.0"
 
 [dependencies.uuid]
 version = "1.8.0"
