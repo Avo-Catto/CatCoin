@@ -35,10 +35,11 @@ use std::{
     error::Error,
     fs::{self, File},
     io::{self, Read, Write},
+    str::FromStr,
 };
 use uuid::Uuid;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Transaction {
     pub src: String,        // Address of sender
     pub dst: String,        // Address of receiver
@@ -90,12 +91,88 @@ impl Transaction {
             Err(e) => return Err(e),
         };
         // construct verifier
-        let verifier = match Verifier::new(MessageDigest::sha1(), &pkey) {
+        let mut verifier = match Verifier::new(MessageDigest::sha1(), &pkey) {
             Ok(n) => n,
             Err(e) => return Err(e),
         };
+
+        println!("\nDEBUG - check signature:\n{:?}\n", self); // DEBUG
+
+        // feed the verifier with delicious data
+        match verifier.update(self.signature_fmt().as_bytes()) {
+            Ok(_) => (),
+            Err(e) => {
+                eprintln!("[#] TRANSACTION:verify - update verifier error: {}", e);
+                return Err(e);
+            }
+        };
         // verify
         verifier.verify(&self.signature)
+    }
+
+    /// Construct a transaction from json.
+    pub fn from_json(
+        json: &serde_json::Value,
+    ) -> Result<Transaction, Box<dyn std::any::Any + Send>> {
+        std::panic::catch_unwind(|| {
+            // initial data
+            Transaction {
+                src: json
+                    .get("src")
+                    .expect("Transaction::from_json: src")
+                    .to_string()
+                    .replace('"', ""),
+                dst: json
+                    .get("dst")
+                    .expect("Transaction::from_json: dst")
+                    .to_string()
+                    .replace('"', ""),
+                val: json
+                    .get("val")
+                    .expect("Transaction::from_json: val")
+                    .as_f64()
+                    .expect("Transaction::from_json: val as f64"),
+                timestamp: json
+                    .get("timestamp")
+                    .expect("Transaction::from_json: timestamp")
+                    .as_i64()
+                    .expect("Transaction::from_json: timestamp as i64"),
+                signature: json
+                    .get("signature")
+                    .expect("Transaction::from_json: signature")
+                    .as_array()
+                    .expect("Transaction::from_json: signature as array")
+                    .iter()
+                    .map(|x| {
+                        x.as_u64()
+                            .expect("Transaction::from_json: signature value as u64")
+                            as u8
+                    })
+                    .collect(),
+                pub_key: json
+                    .get("pub_key")
+                    .expect("Transaction::from_json: public key")
+                    .as_array()
+                    .expect("Transaction::from_json: public key as array")
+                    .iter()
+                    .map(|x| {
+                        x.as_u64()
+                            .expect("Transaction::from_json: public key value as u64")
+                            as u8
+                    })
+                    .collect(),
+                broadcast: json
+                    .get("broadcast")
+                    .expect("Transaction::from_json: broadcast")
+                    .as_bool()
+                    .expect("Transaction::from_json: broadcast as bool"),
+                fee: json
+                    .get("fee")
+                    .expect("Trnasaction::from_json: fee")
+                    .as_f64()
+                    .expect("Transaction::from_json: fee as f64"),
+            }
+        })
     }
 
     /// Sign the transaction.
@@ -118,7 +195,10 @@ impl Transaction {
                 return Err(Box::new(e));
             }
         };
-        match signer.update(format!("{}", self).as_bytes()) {
+
+        println!("\nDEBUG - what's going to be signed:\n{:?}\n", self); // DEBUG
+
+        match signer.update(self.signature_fmt().as_bytes()) {
             Ok(_) => (),
             Err(e) => {
                 eprintln!("[#] TRANSACTION:sign - update signer error: {}", e);
@@ -135,15 +215,21 @@ impl Transaction {
         Ok(())
     }
 
+    /// Signature format for signing and checking signature.
+    fn signature_fmt(&self) -> String {
+        format!(
+            "{}-{}-{}-{}-{}-{:#?}",
+            self.src, self.dst, self.timestamp, self.fee, self.val, self.pub_key
+        )
+    }
+
     /// Check entire transaction.
     pub fn validate(&self) -> Result<(), TVE> {
         // check source
         if !check_addr_by_key(&self.src, &self.pub_key) {
-            println!("key");
             return Err(TVE::InvalidSource);
         }
         if !check_addr_by_sum(&self.src) {
-            println!("sum");
             return Err(TVE::InvalidSource);
         }
         // check destination
@@ -181,8 +267,8 @@ impl std::fmt::Display for Transaction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Source:{}\nDestination: {}\nValue: {}",
-            self.src, self.dst, self.val,
+            "  Source: {}\n  Destination: {}\n  Timestamp: {}\n  Value: {}\n  Fee: {}\n",
+            self.src, self.dst, self.timestamp, self.val, self.fee
         )
     }
 }
@@ -605,6 +691,7 @@ pub fn gen_salt(len: usize) -> String {
     out.concat()
 }
 
+// TODO: don't forget the fee
 pub fn get_balance(addr: &str) -> Result<f64, Box<dyn Error>> {
     let transactions = match get_transactions(addr) {
         Ok(n) => n,
@@ -647,6 +734,7 @@ pub fn get_timestamp(syntax: &str) -> Result<i64, Box<dyn Error>> {
     Ok(out)
 }
 
+// FIXME: this function returns receive rror
 pub fn get_transactions(addr: &str) -> Result<Vec<Transaction>, Box<dyn Error>> {
     // craft request
     let req = Request {
@@ -663,18 +751,45 @@ pub fn get_transactions(addr: &str) -> Result<Vec<Transaction>, Box<dyn Error>> 
         }
     };
     // receive transactions
-    let res = match receive::<Vec<Transaction>>(stream) {
+    let res = match receive::<Vec<String>>(stream) {
         Ok(n) => n,
         Err(e) => {
             output(&format!("get_transactions - receive error: {}", e));
             return Err(e);
         }
     };
+    // parse transactions
+    let mut tmp: Vec<Transaction> = Vec::new();
+    for i in res.res {
+        // parse to json
+        let i: serde_json::Value = match serde_json::Value::from_str(&i) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!(
+                    "[#] TRANSACTIONPOOL:SYNC - parse transaction to json error: {}",
+                    e
+                );
+                return Err(Box::new(e));
+            }
+        };
+        // construct Transaction
+        let transaction = match Transaction::from_json(&i) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!(
+                    "[#] TRANSACTIONPOOL:SYNC - transaction construction error: {:?}",
+                    e
+                );
+                return Err(format!("transaction construction error: {:?}", e).into());
+            }
+        };
+        tmp.push(transaction);
+    }
     // filter transactions
     let mut transactions: Vec<Transaction> = Vec::new();
-    for tx in res.res {
-        if tx.src.contains(&addr.to_string()) || tx.dst == addr {
-            transactions.push(tx);
+    for tx in tmp {
+        if addr == &tx.src || addr == &tx.dst {
+            transactions.push(tx)
         }
     }
     Ok(transactions)

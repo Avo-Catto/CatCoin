@@ -977,6 +977,7 @@ dependencies = [
  "bs58",
  "chrono",
  "clap",
+ "md5",
  "num-bigint",
  "openssl",
  "rand",

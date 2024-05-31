@@ -7,7 +7,6 @@ use crate::{
     share::{ADDR, ARGS, COINBASE},
     utils::*,
 };
-use bs58;
 use openssl::{error::ErrorStack, hash::MessageDigest, pkey::PKey, sign::Verifier};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -77,7 +76,6 @@ impl Block {
 
     /// Performs regex checks on the properties of the block, recalculates it's hashes and
     /// validates its transactions.
-    // TODO: validate coinbase transaction
     pub fn validate(&self, chain: &BlockChain) -> Result<(), BlockError> {
         // check if values of block are valid using regex
         let sha256_re = Regex::new("^[a-fA-F0-9]{64}$").unwrap();
@@ -90,8 +88,26 @@ impl Block {
         if self.clone().calc_hash(self.nonce) != self.hash {
             return Err(BlockError::MismatchHash);
         }
+        // check amount of transactions
+        if self.transactions.len() < 1 {
+            return Err(BlockError::NoCoinbaseTransaction);
+        }
+        // split coinbase & usual transactions
+        let mut coinbase = self.transactions.clone();
+        let transactions = coinbase.split_off(1);
+        let coinbase = &coinbase[0];
+
+        // check coinbase transaction
+        // check source
+        if coinbase.src != *COINBASE.get().unwrap() {
+            return Err(BlockError::MismatchCoinbaseSource);
+        }
+        // check reward
+        if coinbase.val != get_blockreward(self.index) + get_fees(&transactions) {
+            return Err(BlockError::InvalidReward);
+        }
         // check transactions
-        for t in &self.transactions {
+        for t in transactions {
             match t.validate(chain) {
                 Ok(()) => continue,
                 Err(e) => {
@@ -331,6 +347,7 @@ impl BlockChain {
     }
 
     /// Get amount of coins of an address.
+    // TODO: add checking the timestamp
     pub fn get_balance(&self, addr: &str) -> Result<f64, Box<dyn Error>> {
         // get balance
         let mut value = 0_f64;
@@ -347,13 +364,12 @@ impl BlockChain {
     }
 
     /// Returns a list of transactions where the source address matches a specific pattern.
-    // TODO: rename to *_pat & make it only take one pattern, not a vec
-    pub fn get_txs_by_sig(&self, patterns: Vec<Vec<u8>>) -> Vec<Transaction> {
+    pub fn get_txs_by_pat(&self, pattern: &Vec<u8>) -> Vec<Transaction> {
         let mut out: Vec<Transaction> = Vec::new();
         for block in self.get_chain() {
             for transaction in block.transactions {
-                if patterns.contains(&addr_to_pattern(&transaction.src))
-                    || patterns.contains(&addr_to_pattern(&transaction.dst))
+                if pattern == &addr_to_pattern(&transaction.src)
+                    || pattern == &addr_to_pattern(&transaction.dst)
                 {
                     out.push(transaction)
                 }
@@ -538,34 +554,43 @@ impl MineController {
     /// Set next block to be mined.
     /// Returns `true` if block was set and `false` if not.
     fn next_block(&self) -> Result<bool, TryLockError<u8>> {
-        let mut pool = match self.transactionpool.lock() {
-            Ok(n) => n,
-            Err(_) => {
-                eprintln!("[#] MINECONTROLLER - acquire transactionpool error");
-                return Err(TryLockError::WouldBlock);
+        let mut pool = {
+            // lock pool
+            let mut pool = match self.transactionpool.lock() {
+                Ok(n) => n,
+                Err(_) => {
+                    eprintln!("[#] MINECONTROLLER - acquire transactionpool error");
+                    return Err(TryLockError::WouldBlock);
+                }
+            };
+            // flush it
+            match pool.flush() {
+                Some(n) => n,
+                None => vec![],
             }
         };
-        let chain = match self.blockchain.lock() {
-            Ok(n) => n,
-            Err(_) => {
-                eprintln!("[#] MINECONTROLLER - acquire blockchain error");
-                return Err(TryLockError::WouldBlock);
+        let prev_block = {
+            // lock chain
+            let chain = match self.blockchain.lock() {
+                Ok(n) => n,
+                Err(_) => {
+                    eprintln!("[#] MINECONTROLLER - acquire blockchain error");
+                    return Err(TryLockError::WouldBlock);
+                }
+            };
+            // get latest block
+            match chain.get_latest() {
+                Ok(n) => n,
+                Err(_) => {
+                    eprintln!("[#] MINECONTROLLER - get previous block error");
+                    return Ok(false);
+                }
             }
         };
-        let prev_block = match chain.get_latest() {
-            Ok(n) => n,
-            Err(_) => {
-                eprintln!("[#] MINECONTROLLER - get previous block error");
-                return Ok(false);
-            }
-        };
-
-        // DEBUG
-        println!("DEBUG - transactionpool:\n{:?}", pool.pool);
+        let idx = prev_block.index + 1;
 
         // calc block reward
-        let idx = prev_block.index + 1;
-        let reward = get_blockreward(idx);
+        let reward = get_blockreward(idx) + get_fees(&pool);
 
         // coinbase transaction
         let coinbase_tx = match Transaction::get_coinbase(reward) {
@@ -575,14 +600,9 @@ impl MineController {
                 return Ok(false);
             }
         };
+        // collect transactions
         let mut transactions = vec![coinbase_tx];
-
-        // flush pool
-        let mut transactions_ = match pool.flush() {
-            Some(n) => n,
-            None => vec![],
-        };
-        transactions.append(&mut transactions_);
+        transactions.append(&mut pool);
 
         // construct block
         let block = Block::new(idx, transactions, prev_block.hash);
@@ -1001,7 +1021,7 @@ impl MineController {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Transaction {
     pub src: String,        // Address of sender
     pub dst: String,        // Address of receiver
@@ -1027,12 +1047,11 @@ impl Transaction {
             timestamp: timestamp_now() + add,
             signature: Vec::new(),
             pub_key: Vec::new(),
-            broadcast: false,
+            broadcast: true,
             fee: calc_fee(val),
         })
     }
 
-    /// Json representation of the transaction.
     pub fn as_json(&self) -> serde_json::Value {
         json!({
             "src": self.src,
@@ -1054,56 +1073,23 @@ impl Transaction {
             Err(e) => return Err(e),
         };
         // construct verifier
-        let verifier = match Verifier::new(MessageDigest::sha1(), &pkey) {
+        let mut verifier = match Verifier::new(MessageDigest::sha1(), &pkey) {
             Ok(n) => n,
             Err(e) => return Err(e),
+        };
+
+        println!("\nDEBUG - check signature:\n{:?}\n", self); // DEBUG
+
+        // feed the verifier with delicious data
+        match verifier.update(self.signature_fmt().as_bytes()) {
+            Ok(_) => (),
+            Err(e) => {
+                eprintln!("[#] TRANSACTION:verify - update verifier error: {}", e);
+                return Err(e);
+            }
         };
         // verify
         verifier.verify(&self.signature)
-    }
-
-    /// Validate an address.
-    fn check_src(&self) -> bool {
-        // decode address
-        let mut decoded = match bs58::decode(&self.src).into_vec() {
-            Ok(n) => n,
-            Err(_) => return false,
-        };
-        // extract index & salt
-        decoded.reverse();
-        let mut res = decoded.split(|x| char::from_u32(*x as u32) == Some(':'));
-        let salt = match res.next() {
-            Some(n) => String::from_utf8_lossy(n).to_string(),
-            None => return false,
-        };
-        let idx = match res.next() {
-            Some(n) => match String::from_utf8(n.to_vec()) {
-                Ok(n) => match n.parse() {
-                    Ok(n) => n,
-                    Err(_) => return false,
-                },
-                Err(_) => return false,
-            },
-            None => return false,
-        };
-        decoded.reverse();
-
-        // validate address
-        if self.src != gen_address(&self.pub_key, idx, &salt) {
-            return false;
-        }
-        true
-    }
-
-    /// Generate the coinbase transaction.
-    pub fn get_coinbase(reward: f64) -> Result<Self, Box<dyn Error>> {
-        let wallet = unsafe { &ARGS.get().unwrap().wallet };
-        let addr = COINBASE.get().unwrap().to_string();
-        let transaction = match Transaction::new(&addr, &wallet, reward, "") {
-            Ok(n) => n,
-            Err(e) => return Err(e),
-        };
-        Ok(transaction)
     }
 
     /// Construct a transaction from json.
@@ -1114,11 +1100,8 @@ impl Transaction {
                 src: json
                     .get("src")
                     .expect("Transaction::from_json: src")
-                    .as_array()
-                    .expect("Transaction::from_json: src as array")
-                    .iter()
-                    .map(|x| x.to_string())
-                    .collect(),
+                    .to_string()
+                    .replace('"', ""),
                 dst: json
                     .get("dst")
                     .expect("Transaction::from_json: dst")
@@ -1172,24 +1155,67 @@ impl Transaction {
         })
     }
 
-    // TODO: needs huge improvements + check fee
     /// Check entire transaction.
     pub fn validate(&self, chain: &BlockChain) -> Result<(), TVE> {
         // check source
-        if !self.check_src() {
-            return Err(TVE::InvalidSource);
+        match check_addr_by_key(&self.src, &self.pub_key) {
+            Ok(n) => {
+                if !n {
+                    println!("DEBUG - CASE 1"); // DEBUG
+                    return Err(TVE::InvalidSource);
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "[#] TRANSACTION:validate - check source by key error: {}",
+                    e
+                );
+                return Err(TVE::InvalidSource);
+            }
+        }
+        match check_addr_by_sum(&self.src) {
+            Ok(n) => {
+                if !n {
+                    println!("DEBUG - CASE 2"); // DEBUG
+                    return Err(TVE::InvalidSource);
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "[#] TRANSACTION:validate - check source by sum error: {}",
+                    e
+                );
+                return Err(TVE::InvalidSource);
+            }
         }
         // check destination
-        // TODO: do a simple regex check and check for length
+        match check_addr_by_sum(&self.dst) {
+            Ok(n) => {
+                if !n {
+                    return Err(TVE::InvalidDestination);
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "[#] TRANSACTION:validate - check destination by sum error: {}",
+                    e
+                );
+                return Err(TVE::InvalidDestination);
+            }
+        }
         // check value
         if self.val < 0.0 {
             return Err(TVE::InvalidValue);
+        }
+        // check fee
+        if self.fee != calc_fee(self.val) {
+            return Err(TVE::InvalidFee);
         }
         // check balance
         let balance = match chain.get_balance(&self.src) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("[#] TRANSACTION:validate - retrieve balance error: {}", e);
+                eprintln!("[#] TRANSACTION:validate - check balance error: {}", e);
                 return Err(TVE::BalanceError);
             }
         };
@@ -1210,8 +1236,27 @@ impl Transaction {
         }
         Ok(())
     }
-}
 
+    /// Generate the coinbase transaction.
+    pub fn get_coinbase(reward: f64) -> Result<Self, Box<dyn Error>> {
+        let wallet = unsafe { &ARGS.get().unwrap().wallet };
+        let addr = COINBASE.get().unwrap().to_string();
+        let mut transaction = match Transaction::new(&addr, &wallet, reward, "") {
+            Ok(n) => n,
+            Err(e) => return Err(e),
+        };
+        transaction.fee = 0.0;
+        Ok(transaction)
+    }
+
+    /// Signature format for signing and checking signature.
+    fn signature_fmt(&self) -> String {
+        format!(
+            "{}-{}-{}-{}-{}-{:#?}",
+            self.src, self.dst, self.timestamp, self.fee, self.val, self.pub_key
+        )
+    }
+}
 impl std::fmt::Display for Transaction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(

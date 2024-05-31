@@ -1,5 +1,6 @@
 // use crate::blockchain::BlockChain;
 use crate::{
+    blockchain::Transaction,
     comm::*,
     share::{ADDR, ARGS, FEE},
 };
@@ -25,10 +26,13 @@ struct ArgsReceiver {
 
 #[derive(Debug)]
 pub enum BlockError {
+    InvalidReward,
     TransactionValidationFailed,
+    MismatchCoinbaseSource,
     MismatchPreviousHash,
     MismatchHash,
     MismatchMerkleHash,
+    NoCoinbaseTransaction,
 }
 
 impl std::fmt::Display for BlockError {
@@ -91,6 +95,7 @@ pub enum SyncState {
 #[derive(Debug)]
 pub enum TransactionValidationError {
     BalanceError,
+    InvalidFee,
     InvalidSource,
     InvalidSignature,
     InvalidDestination,
@@ -113,9 +118,63 @@ pub fn calc_fee(val: f64) -> f64 {
     val * (fee / 100.0)
 }
 
+/// Validate an address.
+pub fn check_addr_by_key(addr: &str, pub_key: &Vec<u8>) -> Result<bool, Box<dyn Error>> {
+    // check length
+    if !check_addr_len(addr) {
+        return Ok(false);
+    }
+    println!("DEBUG - 1"); // DEBUG
+                           // decode address
+    let decoded = match bs58::decode(addr).into_vec() {
+        Ok(n) => n,
+        Err(e) => return Err(Box::new(e)),
+    };
+    println!("DEBUG - 2"); // DEBUG
+                           // extract salt & index
+    let salt = String::from_utf8_lossy(&decoded[21..33]).to_string();
+    let idx: u32 = match String::from_utf8_lossy(&decoded[33..]).parse() {
+        Ok(n) => n,
+        Err(e) => return Err(Box::new(e)),
+    };
+
+    // DEBUG
+    println!("DEBUG - 3"); // DEBUG
+    let check_addr = gen_address(pub_key, idx, &salt);
+    println!("ADDRESS: {}\nINDEX: {}\nSALT: {}", check_addr, idx, salt);
+    // DEBUG
+
+    // validate address
+    if check_addr != addr {
+        return Ok(false);
+    }
+    println!("DEBUG - 4"); // DEBUG
+    Ok(true)
+}
+
+/// Check address by checksum.
+pub fn check_addr_by_sum(addr: &str) -> Result<bool, Box<dyn Error>> {
+    // check length
+    if !check_addr_len(addr) {
+        return Ok(false);
+    }
+    // decode address
+    let decoded = match bs58::decode(addr).into_vec() {
+        Ok(n) => n,
+        Err(e) => return Err(Box::new(e)),
+    };
+    // compare checksums
+    Ok(Sha224::digest(&decoded[5..])[..5] == decoded[..5])
+}
+
+/// Check length of address.
+pub fn check_addr_len(addr: &str) -> bool {
+    addr.as_bytes().len() > 46
+}
+
 /// Performs a regex check for an address.
 /// Example: 127.0.0.1:8080 - valid
-pub fn check_addr(addr: &String) -> bool {
+pub fn check_ip(addr: &String) -> bool {
     let addr_re = Regex::new(
         r"^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?):(\d{1,5})$"
     ).unwrap();
@@ -153,22 +212,28 @@ pub fn difficulty_from_u8(difficulty: u8) -> BigUint {
     BigUint::parse_bytes(hex_str.as_bytes(), 16).unwrap()
 }
 
-/// Generate an address based on the index.
+/// Generate an address.
+/// Structure: `{checksum 4}:{hash 32}:{salt 4}:{index}`
 pub fn gen_address(pub_key: &Vec<u8>, idx: u32, salt: &String) -> String {
     // hash public key
     let mut a = Sha512::digest(pub_key).to_vec();
     let mut b = a.clone();
 
-    // append index & salt for uniqueness
-    b.extend_from_slice(format!(":{}:{}", idx, salt).as_bytes());
-    a.extend_from_slice(&Sha256::digest(&b));
+    // append salt & index for uniqueness
+    b.extend_from_slice(format!("{}{}", salt, idx).as_bytes());
+    a.extend_from_slice(&Sha512::digest(&b));
 
     // hash again
-    let mut c = Sha224::digest(&a).to_vec();
-    c.extend_from_slice(format!(":{}:{}", idx, salt).as_bytes());
+    let mut c = md5::compute(Sha256::digest(&a[32..96])).to_vec();
+    c.extend_from_slice(format!("{}{}", salt, idx).as_bytes());
+
+    // checksum
+    let checksum = &Sha224::digest(&c)[..5];
+    let mut result = checksum.to_vec();
+    result.extend_from_slice(&c);
 
     // encode address
-    let f = bs58::encode(&b).into_string();
+    let f = bs58::encode(result).into_string();
     f
 }
 
@@ -176,6 +241,13 @@ pub fn gen_address(pub_key: &Vec<u8>, idx: u32, salt: &String) -> String {
 pub fn get_blockreward(idx: u64) -> f64 {
     let args = unsafe { ARGS.get().unwrap() };
     args.reward * 0.5_f64.powf((idx / args.halving) as f64)
+}
+
+/// Calculate the sum of all fees of the given transactions.
+pub fn get_fees(txs: &Vec<Transaction>) -> f64 {
+    let mut out = 0_f64;
+    txs.iter().for_each(|x| out += x.fee);
+    out
 }
 
 /// Function to get the key of a HashMap by the length of the value.
@@ -362,7 +434,7 @@ pub fn sync_peers(
     // check peers
     let mut rm: Vec<String> = Vec::new();
     for peer in &peers_rcved {
-        if !check_addr(&peer) {
+        if !check_ip(&peer) {
             rm.push(peer.to_owned());
         }
     }

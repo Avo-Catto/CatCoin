@@ -6,7 +6,7 @@ use std::{sync::OnceLock, usize};
 
 use console::*;
 use node::comm::{receive, request, AddTransactionResponse, Dtype, Request};
-use wallet::{check_wallet_exists, gen_address, gen_salt, request_fee, Wallet};
+use wallet::{check_wallet_exists, gen_address, gen_salt, get_balance, request_fee, Wallet};
 
 const USER_PATH: &'static str = "client/data/passwd";
 const KEY_PATH: &'static str = "client/data/keys";
@@ -16,7 +16,8 @@ static mut FEE: OnceLock<u8> = OnceLock::new();
 
 fn help() {
     output(
-        "new -> address / transaction / user / wallet
+        "get -> balance [optional: idx]
+new -> address / transaction / user / wallet
 whoami 
 login 
 logout 
@@ -56,6 +57,80 @@ fn main() {
         // process input
         // TODO: exit
         match cmd[0].as_str() {
+            "get" => {
+                if cmd.len() < 2 {
+                    continue;
+                }
+                match cmd[1].as_str() {
+                    "balance" => {
+                        // check if wallet is placeholder
+                        if user.wallet.placeholder {
+                            output("no wallet initialized yet");
+                            continue;
+                        }
+                        // set index
+                        let mut all = false;
+                        let idx = if cmd.len() > 2 {
+                            match cmd[2].parse() {
+                                Ok(n) => n,
+                                Err(e) => {
+                                    output(&format!("invalid index: {}", e));
+                                    continue;
+                                }
+                            }
+                        } else {
+                            all = true;
+                            0
+                        };
+                        if all {
+                            for i in 0..(user.wallet.idx_addr) {
+                                // generate address
+                                let addr = gen_address(
+                                    &user.wallet.pub_key,
+                                    i,
+                                    &match user.wallet.addr_salts.get(i as usize) {
+                                        Some(n) => n.to_string(),
+                                        None => {
+                                            eprint!("None at index: {}", i);
+                                            return;
+                                        }
+                                    },
+                                );
+                                let val = match get_balance(&addr) {
+                                    Ok(n) => n,
+                                    Err(e) => {
+                                        output(&format!("IDX: {} > {} - error: {}", i, addr, e));
+                                        continue;
+                                    }
+                                };
+                                output(&format!("IDX: {} > {}\nVAL: {}\n", i, addr, val));
+                            }
+                        } else {
+                            // generate address
+                            let addr = gen_address(
+                                &user.wallet.pub_key,
+                                idx,
+                                &match user.wallet.addr_salts.get(idx as usize) {
+                                    Some(n) => n.to_string(),
+                                    None => {
+                                        eprint!("None at index: {}", idx);
+                                        return;
+                                    }
+                                },
+                            );
+                            let val = match get_balance(&addr) {
+                                Ok(n) => n,
+                                Err(e) => {
+                                    output(&format!("IDX: {} > {} - error: {}", idx, addr, e));
+                                    continue;
+                                }
+                            };
+                            output(&format!("IDX: {} > {}\nVAL: {}\n", idx, addr, val));
+                        }
+                    }
+                    _ => (),
+                }
+            }
             "help" => help(),
             "new" => {
                 if cmd.len() < 2 {
@@ -301,8 +376,6 @@ fn main() {
 }
 
 // MINDSET: you write quality code, not quick and bad code!
-// > FIXME: the salt is read wrong for validation of the transaction
-// > TODO: make the address shorter
+// TODO: adjust node
 // TODO: one error logging
-// TODO: balance + don't forget about the delay
 // TODO: improve user experience

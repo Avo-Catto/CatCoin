@@ -114,7 +114,6 @@ pub mod share {
                 eprintln!("[#] ARGS - invalid fee (allowed: 0% - 100%)");
                 exit(1);
             }
-            // TODO: check if wallet address is valid
             // format address
             ADDR.get_or_init(|| format!("{}:{}", args.ip, args.port));
 

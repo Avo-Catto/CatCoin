@@ -51,7 +51,7 @@ fn main() {
     };
 
     // synchronize blockchain
-    if !args.genisis && check_addr(&args.entry) {
+    if !args.genisis && check_ip(&args.entry) {
         match blockchain.lock().unwrap().sync(&args.entry) {
             Ok(n) => match n {
                 SyncState::Ready => (),
@@ -178,7 +178,7 @@ fn main() {
                     let peer = request.data;
 
                     // check address
-                    if !check_addr(&peer) {
+                    if !check_ip(&peer) {
                         respond(&stream, AddPeerResponse::FailedCheck);
                         eprintln!("[#] DTYPE:AddPeer - check failed");
                         return;
@@ -229,9 +229,6 @@ fn main() {
                             *peers = subtract_vec(peers.to_vec(), failed);
                         }
                     }
-                    // update fee
-                    let mut transaction = transaction.clone();
-                    transaction.fee = calc_fee(transaction.val);
                     {
                         // check transaction
                         match transaction.validate(&blockchain.lock().unwrap()) {
@@ -438,7 +435,7 @@ fn main() {
 
                 Dtype::GetTransactions => {
                     // parse received patterns
-                    let patterns: Vec<Vec<u8>> = match serde_json::from_str(&request.data) {
+                    let pattern: Vec<u8> = match serde_json::from_str(&request.data) {
                         Ok(n) => n,
                         Err(e) => {
                             eprintln!("[#] DTYPE:GetTransactions - parse error: {}", e);
@@ -448,7 +445,18 @@ fn main() {
                     };
                     // search for transactions using the patterns
                     let chain = { blockchain.lock().unwrap().clone() };
-                    respond(&stream, chain.get_txs_by_sig(patterns))
+
+                    println!(
+                        "DEBUG - get transactions by pattern: {:?}",
+                        chain.get_txs_by_pat(&pattern)
+                    ); // DEBUG
+
+                    let transactions: Vec<String> = chain
+                        .get_txs_by_pat(&pattern)
+                        .iter()
+                        .map(|x| x.as_json().to_string()) // parse transaction to json
+                        .collect();
+                    respond(&stream, transactions)
                 }
 
                 Dtype::GetTransactionPool => {

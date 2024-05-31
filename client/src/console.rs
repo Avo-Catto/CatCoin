@@ -181,7 +181,7 @@ pub fn new_transaction(wallet: &Wallet) -> Result<Transaction, Box<dyn Error>> {
 /// Create a new user and return the username.
 pub fn new_user() -> Result<String, io::Error> {
     let username = prompt("username: ").concat().to_string();
-    let password = prompt_password("password: ").unwrap();
+    let password = prompt_password(" [~]> password: ").unwrap();
     let id = Uuid::new_v4();
 
     // get users
