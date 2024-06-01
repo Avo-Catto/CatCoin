@@ -2,7 +2,7 @@
 use crate::{
     blockchain::Transaction,
     comm::*,
-    share::{ADDR, ARGS, FEE},
+    share::{ADDR, ARGS, COINBASE, FEE},
 };
 use chrono::Utc;
 use num_bigint::BigUint;
@@ -395,6 +395,36 @@ pub fn sync_args(addr: &str) -> Result<SyncState, SyncError> {
             }
         };
     }
+    Ok(SyncState::Ready)
+}
+
+/// Synchroniye the coinbase address.
+/// Returns `SyncState::Ready` if the synchronization succeeds.
+pub fn sync_coinbase(addr: &str) -> Result<SyncState, SyncError> {
+    // craft request
+    let req = Request {
+        dtype: Dtype::GetCoinbaseAddress,
+        data: "",
+        addr: addr.to_string(),
+    };
+    // send request
+    let stream = match request(addr, &req) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("[#] COINBASE:SYNC - request list of peers error: {}", e);
+            return Err(SyncError::Request);
+        }
+    };
+    // receive list of peers
+    let response: Response<String> = match receive(stream) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("[#] COINBASE:SYNC - receive list of peers error: {}", e);
+            return Err(SyncError::Receive);
+        }
+    };
+    // set coinbase address
+    COINBASE.get_or_init(|| response.res);
     Ok(SyncState::Ready)
 }
 

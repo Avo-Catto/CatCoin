@@ -2,10 +2,11 @@ pub mod blockchain;
 pub mod comm;
 pub mod utils;
 pub mod share {
+    use crate::utils::{gen_address, sync_coinbase};
     use chrono::Utc;
     use clap::Parser;
+    use openssl::pkey::PKey;
     use serde_json::json;
-    use sha2::{Digest, Sha256};
     use std::process::exit;
     use std::sync::OnceLock;
 
@@ -119,20 +120,27 @@ pub mod share {
 
             // set fee
             FEE.get_or_init(|| args.fee);
+
+            // set coinbase address
+            if !ARGS.get().unwrap().genisis {
+                // synchronize address
+                match sync_coinbase(&args.entry) {
+                    Ok(_) => (),
+                    Err(e) => {
+                        eprintln!("[#] COINBASE - sync error: {}", e);
+                        exit(1);
+                    }
+                }
+            } else {
+                // generate coinbase address
+                let c = Utc::now().timestamp().to_string();
+                let priv_key = PKey::generate_ed448().unwrap();
+                let pub_key = priv_key.public_key_to_pem().unwrap();
+                let address = gen_address(&pub_key, 16, &c);
+
+                // initialize
+                COINBASE.get_or_init(|| address);
+            }
         }
-
-        // set coinbase address
-        let c = Sha256::digest(Utc::now().timestamp().to_le_bytes());
-
-        // calculate checksum
-        let d = Sha256::digest(c);
-        let mut checksum = d[0..8].to_vec();
-
-        // append checksum
-        let mut c = c.to_vec();
-        c.append(&mut checksum);
-
-        // encoded & set address
-        COINBASE.get_or_init(|| bs58::encode(&c).into_string());
     }
 }

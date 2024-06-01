@@ -103,6 +103,7 @@ pub enum Dtype {
     GetArgs,
     GetBlock,
     GetBlockchain,
+    GetCoinbaseAddress,
     GetFee,
     GetPeers,
     GetPoolHash,

@@ -5,7 +5,7 @@ extern crate serde_json;
 use node::{
     blockchain::*,
     comm::*,
-    share::{self, FEE},
+    share::{self, COINBASE, FEE},
     utils::*,
 };
 use num_bigint::BigUint;
@@ -254,8 +254,6 @@ fn main() {
                     }
                 }
 
-                Dtype::GetArgs => respond(&stream, args.as_json().to_string()),
-
                 // TODO: prevent dos attack here
                 Dtype::CheckSync => {
                     respond(&stream, CheckSyncResponse::OK);
@@ -360,6 +358,8 @@ fn main() {
                     }
                 }
 
+                Dtype::GetArgs => respond(&stream, args.as_json().to_string()),
+
                 Dtype::GetBlock => {
                     // lock chain & parse index
                     let chain = blockchain.lock().unwrap();
@@ -414,6 +414,8 @@ fn main() {
                     respond(&stream, blocks);
                 }
 
+                Dtype::GetCoinbaseAddress => respond(&stream, COINBASE.get().unwrap()),
+
                 Dtype::GetFee => respond(&stream, FEE.get().unwrap()),
 
                 Dtype::GetPoolHash => match merkle_hash(
@@ -429,9 +431,7 @@ fn main() {
                     None => respond(&stream, ""),
                 },
 
-                Dtype::GetPeers => {
-                    respond(&stream, peers.lock().unwrap());
-                }
+                Dtype::GetPeers => respond(&stream, peers.lock().unwrap()),
 
                 Dtype::GetTransactions => {
                     // parse received patterns
@@ -556,13 +556,10 @@ fn main() {
     }
 }
 
-// > TODO: coinbase transaction - generate coins
-// > TODO: wallet generation
-// > TODO: crawling blockchain -> blurring for anonymity
+// TODO: from_json functions replace .expect with something that doesn't panic
 // TODO: other todos
 // TODO: make the node only resyncing until it's valid again
 // TODO: store the blockchain in a file or maybe multiple files
-// TODO: add fees
 // TODO: make difficulty automatically adjustable (maybe by amount of miners)
 // TODO: add pool feature where nodes have ID's to mine more efficiently
 // TODO: add Docs to functions

@@ -64,6 +64,19 @@ impl Block {
         }
     }
 
+    /// Json representation of block.
+    pub fn as_json(&self) -> serde_json::Value {
+        json!({
+            "index": self.index,
+            "timestamp": self.timestamp,
+            "transactions": self.transactions.iter().map(|x| x.as_json()).collect::<Vec<serde_json::Value>>(),
+            "previous_hash": self.previous_hash,
+            "nonce": self.nonce,
+            "hash": self.hash,
+            "merkle": self.merkle,
+        })
+    }
+
     /// Calculates the hash of the block using a nonce.
     /// The function also updates the hash and nonce properties of the Block and returns the hash.
     pub fn calc_hash(&mut self, nonce: u64) -> String {
@@ -72,6 +85,70 @@ impl Block {
         let hash = hash_str(format!("{}${}", self.hash_str, nonce).as_bytes());
         self.hash = hash.clone();
         hash
+    }
+
+    /// Contstruct a block from json.
+    pub fn from_json(json: &serde_json::Value) -> Result<Block, Box<dyn Any + Send>> {
+        // deserialize transactions
+        let json = json.clone();
+        let mut transactions: Vec<Transaction> = Vec::new();
+        let data = json.get("transactions");
+        let idx = json
+            .get("index")
+            .unwrap()
+            .as_u64()
+            .expect("Block::from_json: index");
+
+        // transactions
+        if data.is_some() {
+            // parse transactions
+            let tx_json = match data.unwrap().as_array() {
+                Some(n) => n.to_owned(),
+                None => {
+                    return Err(Box::new(
+                        "Block::from_json: parse raw transactions to array error",
+                    ))
+                }
+            };
+            // check amount of transactiosn
+            if tx_json.len() < 1 && idx != 0 {
+                return Err(Box::new("Block::from_json: no transactions"));
+            }
+            // iterate through transactions
+            for tx in tx_json {
+                // construct Transactions
+                match Transaction::from_json(&tx) {
+                    Ok(n) => transactions.push(n),
+                    Err(e) => return Err(e),
+                }
+            }
+        } else {
+            return Err(Box::new("Block::from_json: no raw transactions"));
+        }
+        // construct block
+        let mut block = Self::new(
+            idx,
+            transactions,
+            json.get("previous_hash")
+                .unwrap()
+                .to_string()
+                .replace('"', ""),
+        );
+        // update values
+        block.timestamp = json
+            .get("timestamp")
+            .unwrap()
+            .as_i64()
+            .expect("Block::from_json: timestamp");
+        block.nonce = json
+            .get("nonce")
+            .unwrap()
+            .as_u64()
+            .expect("Block::from_json: nonce");
+        block.hash = json.get("hash").unwrap().to_string().replace("\"", "");
+        block.merkle = json.get("merkle").unwrap().to_string().replace("\"", "");
+        block.hash_str = format!("{}${}${}", block.index, block.timestamp, block.merkle);
+        Ok(block)
     }
 
     /// Performs regex checks on the properties of the block, recalculates it's hashes and
@@ -88,6 +165,10 @@ impl Block {
         if self.clone().calc_hash(self.nonce) != self.hash {
             return Err(BlockError::MismatchHash);
         }
+        // prevent failing on genisis block
+        if self.index == 0 {
+            return Ok(());
+        }
         // check amount of transactions
         if self.transactions.len() < 1 {
             return Err(BlockError::NoCoinbaseTransaction);
@@ -97,12 +178,11 @@ impl Block {
         let transactions = coinbase.split_off(1);
         let coinbase = &coinbase[0];
 
-        // check coinbase transaction
-        // check source
+        // check coinbase source
         if coinbase.src != *COINBASE.get().unwrap() {
             return Err(BlockError::MismatchCoinbaseSource);
         }
-        // check reward
+        // check coinbase reward
         if coinbase.val != get_blockreward(self.index) + get_fees(&transactions) {
             return Err(BlockError::InvalidReward);
         }
@@ -133,65 +213,6 @@ impl Block {
             return Err(BlockError::MismatchMerkleHash);
         }
         Ok(())
-    }
-
-    /// Json representation of block.
-    pub fn as_json(&self) -> serde_json::Value {
-        json!({
-            "index": self.index,
-            "timestamp": self.timestamp,
-            "transactions": self.transactions.iter().map(|x| x.as_json()).collect::<Vec<serde_json::Value>>(),
-            "previous_hash": self.previous_hash,
-            "nonce": self.nonce,
-            "hash": self.hash,
-            "merkle": self.merkle,
-        })
-    }
-
-    /// Contstruct a block from json.
-    pub fn from_json(json: &serde_json::Value) -> Result<Block, Box<dyn Any + Send>> {
-        // deserialize transactions
-        let json = json.clone();
-        let mut transactions: Vec<Transaction> = Vec::new();
-        let data = json.get("transactions");
-
-        // iterate through transactions
-        if data.is_some() {
-            for t in data.unwrap().as_array().unwrap() {
-                // construct transactions
-                match Transaction::from_json(t) {
-                    Ok(n) => transactions.push(n),
-                    Err(e) => return Err(Box::new(e)),
-                };
-            }
-        }
-        // construct block
-        let mut block = Self::new(
-            json.get("index")
-                .unwrap()
-                .as_u64()
-                .expect("Block::from_json: index"),
-            transactions,
-            json.get("previous_hash")
-                .unwrap()
-                .to_string()
-                .replace('"', ""),
-        );
-        // update values
-        block.timestamp = json
-            .get("timestamp")
-            .unwrap()
-            .as_i64()
-            .expect("Block::from_json: timestamp");
-        block.nonce = json
-            .get("nonce")
-            .unwrap()
-            .as_u64()
-            .expect("Block::from_json: nonce");
-        block.hash = json.get("hash").unwrap().to_string().replace("\"", "");
-        block.merkle = json.get("merkle").unwrap().to_string().replace("\"", "");
-        block.hash_str = format!("{}${}${}", block.index, block.timestamp, block.merkle);
-        Ok(block)
     }
 }
 
@@ -347,7 +368,8 @@ impl BlockChain {
     }
 
     /// Get amount of coins of an address.
-    // TODO: add checking the timestamp
+    // TODO: add checking the timestamp, just return both, current value and pending coins
+    // FIXME: doesn't calculate the fee?
     pub fn get_balance(&self, addr: &str) -> Result<f64, Box<dyn Error>> {
         // get balance
         let mut value = 0_f64;
@@ -443,6 +465,7 @@ impl BlockChain {
             let block = match Block::from_json(&data.block) {
                 Ok(n) => n,
                 Err(e) => {
+                    println!("DEBUG - block json {:#?}", &data.block); // DEBUG
                     eprintln!("[#] BLOCKCHAIN:SYNC - parsing block error: {:?}", e);
                     continue;
                 }
@@ -452,7 +475,8 @@ impl BlockChain {
                 Ok(_) => {
                     idx += 1;
                     length = data.len;
-                    println!("[+] BLOCKCHAIN:SYNC - [ {} / {} ]", idx, length);
+                    println!("[+] BLOCKCHAIN:SYNC - [ {} / {} ]", idx, length); // TODO: make it
+                                                                                // steps
                 }
                 Err(e) => eprintln!("[#] BLOCKCHAIN:SYNC - adding block error: {}", e),
             }
@@ -971,6 +995,7 @@ impl MineController {
 
     /// Synchronize the currently mined block.
     /// Returns `SyncState::Ready` if everything worked fine.
+    // FIXME: the node mines the coinbase transaction for the other node, not for it's own address
     pub fn sync(&self, current_block: &Arc<Mutex<Block>>) -> Result<SyncState, SyncError> {
         // get address for synchronizing
         let addr = { self.sync_addr.lock().unwrap().clone() };
@@ -1008,13 +1033,35 @@ impl MineController {
             }
         };
         // construct block
-        let block = match Block::from_json(&data) {
+        let mut block = match Block::from_json(&data) {
             Ok(n) => n,
             Err(e) => {
                 eprintln!("[#] MINECONTROLLER:SYNC - parsing block error: {:?}", e);
                 return Err(SyncError::InvalidValue);
             }
         };
+        // get transactions
+        let transactions = match block.transactions.get(1..) {
+            Some(n) => n.to_vec(),
+            None => return Err(SyncError::InvalidValue),
+        };
+        // calc block reward
+        let reward = get_blockreward(block.index) + get_fees(&transactions);
+
+        // coinbase transaction
+        let coinbase_tx = match Transaction::get_coinbase(reward) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!(
+                    "[#] MINECONTROLLER:SYNC - get coinbase transaction error: {}",
+                    e
+                );
+                return Err(SyncError::InvalidValue);
+            }
+        };
+        // update coinbase transaction
+        block.transactions[0] = coinbase_tx;
+
         // set block
         *current_block.lock().unwrap() = block;
         Ok(SyncState::Ready)
@@ -1155,6 +1202,26 @@ impl Transaction {
         })
     }
 
+    /// Generate the coinbase transaction.
+    pub fn get_coinbase(reward: f64) -> Result<Self, Box<dyn Error>> {
+        let wallet = unsafe { &ARGS.get().unwrap().wallet };
+        let addr = COINBASE.get().unwrap().to_string();
+        let mut transaction = match Transaction::new(&addr, &wallet, reward, "") {
+            Ok(n) => n,
+            Err(e) => return Err(e),
+        };
+        transaction.fee = 0.0;
+        Ok(transaction)
+    }
+
+    /// Signature format for signing and checking signature.
+    fn signature_fmt(&self) -> String {
+        format!(
+            "{}-{}-{}-{}-{}-{:#?}",
+            self.src, self.dst, self.timestamp, self.fee, self.val, self.pub_key
+        )
+    }
+
     /// Check entire transaction.
     pub fn validate(&self, chain: &BlockChain) -> Result<(), TVE> {
         // check source
@@ -1235,26 +1302,6 @@ impl Transaction {
             }
         }
         Ok(())
-    }
-
-    /// Generate the coinbase transaction.
-    pub fn get_coinbase(reward: f64) -> Result<Self, Box<dyn Error>> {
-        let wallet = unsafe { &ARGS.get().unwrap().wallet };
-        let addr = COINBASE.get().unwrap().to_string();
-        let mut transaction = match Transaction::new(&addr, &wallet, reward, "") {
-            Ok(n) => n,
-            Err(e) => return Err(e),
-        };
-        transaction.fee = 0.0;
-        Ok(transaction)
-    }
-
-    /// Signature format for signing and checking signature.
-    fn signature_fmt(&self) -> String {
-        format!(
-            "{}-{}-{}-{}-{}-{:#?}",
-            self.src, self.dst, self.timestamp, self.fee, self.val, self.pub_key
-        )
     }
 }
 impl std::fmt::Display for Transaction {
