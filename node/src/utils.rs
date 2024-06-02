@@ -12,6 +12,7 @@ use sha2::{Digest, Sha224, Sha256, Sha512};
 use std::{
     collections::HashMap,
     error::Error,
+    process::{Command, Stdio},
     sync::{Arc, Mutex},
 };
 
@@ -185,6 +186,24 @@ pub fn check_ip(addr: &String) -> bool {
 pub fn check_sha256(hash_str: &String) -> bool {
     let sha256_re = Regex::new("^[a-fA-F0-9]{64}$").unwrap();
     sha256_re.is_match(hash_str)
+}
+
+/// Compile the miner if necessary.
+pub fn compile_miner() -> Result<(), Box<dyn Error>> {
+    // compile miner
+    let mut child = match Command::new("cargo")
+        .args(["build", "-r", "--bin", "miner"])
+        .stdout(Stdio::null())
+        .spawn()
+    {
+        Ok(n) => n,
+        Err(e) => return Err(Box::new(e)),
+    };
+    // wait until finished
+    match child.wait() {
+        Ok(_) => Ok(()),
+        Err(e) => Err(Box::new(e)),
+    }
 }
 
 /// Collect all responses and addresses of nodes on a specific request. The response will be the

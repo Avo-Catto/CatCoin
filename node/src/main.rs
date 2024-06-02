@@ -41,6 +41,14 @@ fn main() {
     // get updated args
     let args = unsafe { share::ARGS.get().unwrap().to_owned() };
 
+    // compile miner
+    match compile_miner() {
+        Ok(_) => (),
+        Err(e) => {
+            eprintln!("[#] MINER:SETUP - compilation error: {}", e);
+            exit(1);
+        }
+    }
     // construct mutex objects
     let difficulty = Arc::new(Mutex::new(args.difficulty));
     let peers = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -556,7 +564,6 @@ fn main() {
     }
 }
 
-// TODO: from_json functions replace .expect with something that doesn't panic
 // TODO: other todos
 // TODO: make the node only resyncing until it's valid again
 // TODO: store the blockchain in a file or maybe multiple files
@@ -564,9 +571,6 @@ fn main() {
 // TODO: add pool feature where nodes have ID's to mine more efficiently
 // TODO: add Docs to functions
 // TODO: improve logging -> write a logger
-// TODO: real signatures and real wallet addresses
-// TODO: multi signatures
-// TODO: web server + website for hot wallet
 // TODO: licency
 //
 // TODO: in far future:

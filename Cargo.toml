@@ -29,11 +29,7 @@ version = "1.7.0"
 features = ["v4", "fast-rng", "macro-diagnostics"]
 
 [workspace]
-members = ["node", "miner", "web", "client"]
-
-[[bin]]
-name = "web"
-path = "web/src/main.rs"
+members = ["node", "miner", "client"]
 
 [[bin]]
 name = "node"
