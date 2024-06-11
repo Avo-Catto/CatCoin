@@ -1,4 +1,3 @@
-// use crate::blockchain::BlockChain;
 use crate::{
     blockchain::Transaction,
     comm::*,
@@ -25,8 +24,18 @@ struct ArgsReceiver {
     fee: u8,
 }
 
+#[derive(Deserialize)]
+pub struct BlockHead {
+    pub hash: String,
+    pub merkle: String,
+    pub nonce: u64,
+    pub previous_hash: String,
+    pub timestamp: i64,
+}
+
 #[derive(Debug)]
 pub enum BlockError {
+    BlockNotInChain,
     InvalidReward,
     TransactionValidationFailed,
     MismatchCoinbaseSource,
@@ -46,6 +55,7 @@ impl std::error::Error for BlockError {}
 #[derive(Debug)]
 pub enum BlockChainError {
     BlockAlreadyInChain,
+    DatabaseError,
     InvalidIndex,
     InvalidPreviousHash,
     InvalidTimeStamp,
@@ -107,8 +117,8 @@ pub enum TransactionValidationError {
 pub type TVE = TransactionValidationError;
 
 /// Convert address to pattern.
-pub fn addr_to_pattern(addr: &str) -> Vec<u8> {
-    let out: Vec<u8> = addr.bytes().map(|x| x % 2).collect();
+pub fn addr_to_pattern(addr: &[u8]) -> Vec<u8> {
+    let out: Vec<u8> = addr.iter().map(|x| x % 2).collect();
     out
 }
 
@@ -170,7 +180,7 @@ pub fn check_addr_by_sum(addr: &str) -> Result<bool, Box<dyn Error>> {
 
 /// Check length of address.
 pub fn check_addr_len(addr: &str) -> bool {
-    addr.as_bytes().len() > 46
+    addr.as_bytes().len() > 43
 }
 
 /// Performs a regex check for an address.
@@ -351,6 +361,22 @@ pub fn merkle_hash(data: Vec<String>) -> Option<String> {
     } else {
         None
     }
+}
+
+// Convert an u8 array to an u64 vector.
+pub fn u8_to_u64_vec(val: &[u8]) -> Result<Vec<u64>, Box<dyn Error>> {
+    if val.len() % 8 != 0 {
+        return Err(format!("invalid chunk size: {}", val.len()).into());
+    }
+    let mut out = Vec::new();
+    for i in val.chunks(8) {
+        let mut temp = i[0] as u64;
+        for x in 1..i.len() {
+            temp = temp << 8 | i[x] as u64
+        }
+        out.push(temp);
+    }
+    Ok(out)
 }
 
 /// Removes the elements of y from x.

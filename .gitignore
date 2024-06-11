@@ -1,3 +1,6 @@
+/client/data
+/node/data
 /target
 .$*
 __*
+Cargo.lock

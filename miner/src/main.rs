@@ -3,9 +3,8 @@ extern crate node;
 extern crate num_bigint;
 extern crate serde;
 extern crate serde_json;
-use node::{blockchain::Block, utils::difficulty_from_u8};
-
 use base64::{engine::general_purpose::STANDARD, Engine};
+use node::{blockchain::Block, utils::difficulty_from_u8};
 use num_bigint::BigUint;
 use serde::Deserialize;
 use serde_json::json;
@@ -27,7 +26,6 @@ fn mine(target_val: BigUint, block: &mut Block, mut start: u64) {
             e
         ),
     });
-
     // enter loop
     let mut val = difficulty_from_u8(0);
     while val > target_val {
@@ -68,7 +66,6 @@ fn main() {
             exit(1);
         }
     };
-
     // hash block
     mine(difficulty_from_u8(json.difficulty), &mut block, json.start);
 

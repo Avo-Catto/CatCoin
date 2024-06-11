@@ -46,11 +46,13 @@ impl std::fmt::Debug for AddTransactionResponse {
 
 #[derive(Deserialize)]
 pub enum CheckSyncResponse {
+    Blocked,
     OK,
 }
 impl std::fmt::Debug for CheckSyncResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            CheckSyncResponse::Blocked => write!(f, "\"Blocked\""),
             CheckSyncResponse::OK => write!(f, "\"OK\""),
         }
     }
@@ -102,7 +104,6 @@ pub enum Dtype {
     CheckSync,
     GetArgs,
     GetBlock,
-    GetBlockchain,
     GetCoinbaseAddress,
     GetFee,
     GetPeers,

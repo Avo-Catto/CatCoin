@@ -7,6 +7,7 @@ pub mod share {
     use clap::Parser;
     use openssl::pkey::PKey;
     use serde_json::json;
+    use std::fs;
     use std::process::exit;
     use std::sync::OnceLock;
 
@@ -24,7 +25,7 @@ pub mod share {
         #[arg(short, long, default_value_t = false)]
         genisis: bool,
 
-        /// entry node to join the network
+        /// entry from node to join the network
         #[arg(short, long, default_value_t = String::from("127.0.0.1:8000"))]
         entry: String,
 
@@ -51,6 +52,14 @@ pub mod share {
         /// percentage of fee
         #[arg(short, long, default_value_t = 5)]
         fee: u8,
+
+        /// lock sync request after syncing for x blocks
+        #[arg(short, long, default_value_t = 3)]
+        checklock: u8,
+
+        /// sync from entry node
+        #[arg(short, long, default_value_t = false)]
+        sync: bool,
     }
 
     #[derive(Debug)]
@@ -65,6 +74,8 @@ pub mod share {
         pub reward: f64,
         pub halving: u64,
         pub fee: u8,
+        pub checklock: u8,
+        pub sync: bool,
     }
     impl Args_ {
         /// Return the necessary information for synchronization as json.
@@ -83,6 +94,9 @@ pub mod share {
     pub static ADDR: OnceLock<String> = OnceLock::new();
     pub static COINBASE: OnceLock<String> = OnceLock::new();
     pub static FEE: OnceLock<u8> = OnceLock::new();
+    pub static DB_HEAD_PATH: OnceLock<String> = OnceLock::new();
+    pub static DB_POS_PATH: OnceLock<String> = OnceLock::new();
+    pub static DB_TXS_PATH: OnceLock<String> = OnceLock::new();
 
     fn parse_args() -> Args_ {
         let args = Args::parse();
@@ -97,6 +111,8 @@ pub mod share {
             reward: args.reward,
             halving: args.halving,
             fee: args.fee,
+            checklock: args.checklock,
+            sync: args.sync,
         }
     }
 
@@ -122,7 +138,8 @@ pub mod share {
             FEE.get_or_init(|| args.fee);
 
             // set coinbase address
-            if !ARGS.get().unwrap().genisis {
+            let args = ARGS.get().unwrap();
+            if !args.genisis && args.sync {
                 // synchronize address
                 match sync_coinbase(&args.entry) {
                     Ok(_) => (),
@@ -142,5 +159,18 @@ pub mod share {
                 COINBASE.get_or_init(|| address);
             }
         }
+        // create directory
+        let path = format!("node/data/{}", unsafe { ARGS.get().unwrap().port });
+        match fs::create_dir_all(&path) {
+            Ok(_) => (),
+            Err(e) => {
+                eprintln!("[#] SETUP - create data directory for node error: {}", e);
+                exit(1);
+            }
+        }
+        // initialize statics
+        DB_HEAD_PATH.get_or_init(|| format!("{}/{}", path, "head"));
+        DB_POS_PATH.get_or_init(|| format!("{}/{}", path, "position"));
+        DB_TXS_PATH.get_or_init(|| format!("{}/{}", path, "transaction"));
     }
 }

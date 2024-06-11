@@ -596,6 +596,7 @@ pub fn check_addr_by_key(addr: &str, pub_key: &Vec<u8>) -> bool {
 pub fn check_addr_by_sum(addr: &str) -> bool {
     // check length
     if !check_addr_len(addr) {
+        println!("address too short: {}", addr.len()); // DEBUG
         return false;
     }
     // decode address
@@ -612,7 +613,7 @@ pub fn check_addr_by_sum(addr: &str) -> bool {
 
 /// Check length of address.
 pub fn check_addr_len(addr: &str) -> bool {
-    addr.as_bytes().len() > 46
+    addr.as_bytes().len() > 43
 }
 
 /// Check if a user already has a wallet.
@@ -691,7 +692,7 @@ pub fn gen_salt(len: usize) -> String {
     out.concat()
 }
 
-// TODO: don't forget the fee
+// TODO: balance and future balance
 pub fn get_balance(addr: &str) -> Result<f64, Box<dyn Error>> {
     let transactions = match get_transactions(addr) {
         Ok(n) => n,
@@ -734,7 +735,6 @@ pub fn get_timestamp(syntax: &str) -> Result<i64, Box<dyn Error>> {
     Ok(out)
 }
 
-// FIXME: this function returns receive rror
 pub fn get_transactions(addr: &str) -> Result<Vec<Transaction>, Box<dyn Error>> {
     // craft request
     let req = Request {
@@ -830,4 +830,30 @@ pub fn request_fee() -> Result<Option<u8>, Box<dyn Error>> {
 /// Returns the current timestamp.
 pub fn timestamp_now() -> i64 {
     Utc::now().timestamp()
+}
+
+pub fn test() {
+    // craft request
+    let req = Request {
+        dtype: Dtype::CheckSync,
+        data: "",
+        addr: String::new(),
+    };
+    // send request
+    let stream = match request(unsafe { ADDRESS.get().unwrap() }, &req) {
+        Ok(n) => n,
+        Err(e) => {
+            output(&format!("TEST - request error: {}", e));
+            return;
+        }
+    };
+    // receive response
+    let res = match receive::<String>(stream) {
+        Ok(n) => n,
+        Err(e) => {
+            output(&format!("TEST - receive error: {}", e));
+            return;
+        }
+    };
+    print!("DEBUG - OUTPUT: {:?}", res);
 }

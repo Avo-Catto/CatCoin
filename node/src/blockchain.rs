@@ -4,19 +4,20 @@ use self::base64::{engine::general_purpose::STANDARD, Engine};
 use self::rand::{seq::SliceRandom, thread_rng, Rng};
 use crate::{
     comm::*,
-    share::{ADDR, ARGS, COINBASE},
+    share::{ADDR, ARGS, COINBASE, DB_HEAD_PATH, DB_POS_PATH, DB_TXS_PATH},
     utils::*,
 };
 use openssl::{error::ErrorStack, hash::MessageDigest, pkey::PKey, sign::Verifier};
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sled::{Db, IVec};
+use std::collections::HashMap;
 use std::{
     any::Any,
     error::Error,
     io::{BufReader, BufWriter, Read, Write},
     panic::catch_unwind,
-    process::{Child, Command, Stdio},
+    process::{exit, Child, Command, Stdio},
     str::FromStr,
     sync::{mpsc, Arc, Mutex, TryLockError},
     thread,
@@ -56,11 +57,11 @@ impl Block {
             index,
             timestamp: timestamp.clone(),
             transactions,
-            previous_hash: prev_hash,
+            previous_hash: prev_hash.clone(),
             nonce: 0,
             hash: String::new(),
             merkle: merkle.clone(),
-            hash_str: format!("{}${}${}", index, timestamp, merkle),
+            hash_str: format!("{}${}${}${}", index, timestamp, merkle, prev_hash),
         }
     }
 
@@ -85,6 +86,41 @@ impl Block {
         let hash = hash_str(format!("{}${}", self.hash_str, nonce).as_bytes());
         self.hash = hash.clone();
         hash
+    }
+
+    /// Construct a block from bytes.
+    pub fn from_db_data(
+        idx: u64,
+        head: &IVec,
+        transactions: &Vec<IVec>,
+    ) -> Result<Self, Box<dyn Error>> {
+        // parse head to json
+        let head: BlockHead = match serde_json::from_slice(head) {
+            Ok(n) => n,
+            Err(e) => return Err(Box::new(e)),
+        };
+        // construct transactions
+        let mut txs: Vec<Transaction> = Vec::new();
+        for tx in transactions {
+            match Transaction::from_db_data(tx) {
+                Ok(n) => txs.push(n),
+                Err(e) => return Err(format!("{:?}", e).into()),
+            };
+        }
+        // construct block
+        Ok(Self {
+            index: idx,
+            timestamp: head.timestamp,
+            transactions: txs,
+            previous_hash: head.previous_hash.clone(),
+            nonce: head.nonce,
+            hash: String::new(),
+            merkle: head.merkle.clone(),
+            hash_str: format!(
+                "{}${}${}${}",
+                idx, head.timestamp, head.merkle, head.previous_hash
+            ),
+        })
     }
 
     /// Contstruct a block from json.
@@ -164,15 +200,62 @@ impl Block {
             }
         };
         // construct block
-        let mut block = Self::new(idx, transactions, previous_hash);
+        let mut block = Self::new(idx, transactions, previous_hash.clone());
 
         // update values
         block.timestamp = timestamp;
         block.nonce = nonce;
         block.hash = hash;
         block.merkle = merkle.clone();
-        block.hash_str = format!("{}${}${}", idx, timestamp, merkle);
+        block.hash_str = format!("{}${}${}${}", idx, timestamp, merkle, previous_hash);
         Ok(block)
+    }
+
+    /// Split the block in two seperated parts as bytes for storing it in the database.
+    /// Returns: `(index, head, Vec<transactions>, positions)`
+    pub fn to_db_data(&self) -> ([u8; 8], IVec, Vec<IVec>, HashMap<String, Vec<u8>>) {
+        let head = json!({
+            "hash": self.hash,
+            "merkle": self.merkle,
+            "nonce": self.nonce,
+            "previous_hash": self.previous_hash,
+            "timestamp": self.timestamp,
+        })
+        .to_string();
+
+        // get positions
+        let mut positions: HashMap<String, Vec<u8>> = HashMap::new();
+        let mut ivec_txs: Vec<IVec> = Vec::new();
+        let mut idx = 0_u8;
+        for tx in &self.transactions {
+            // source
+            let mut val = match positions.get(&tx.src) {
+                Some(n) => n.to_owned(),
+                None => Vec::new(),
+            };
+            val.push(idx);
+            println!("DEBUG - to db data src: {:?}", val); // DEBUG
+            positions.insert(tx.src.clone(), val);
+
+            // destination
+            let mut val = match positions.get(&tx.dst) {
+                Some(n) => n.to_owned(),
+                None => Vec::new(),
+            };
+            val.push(idx);
+            println!("DEBUG - to db data dst: {:?}", val); // DEBUG
+            positions.insert(tx.dst.clone(), val);
+
+            // parse to bytes
+            ivec_txs.push(IVec::from(tx.as_json().to_string().as_bytes()));
+            idx += 1;
+        }
+        (
+            self.index.to_be_bytes(),
+            IVec::from(head.as_bytes()),
+            ivec_txs,
+            positions,
+        )
     }
 
     /// Performs checks on the properties of the block, recalculates it's hashes and
@@ -184,9 +267,15 @@ impl Block {
         }
         // check previous hash
         if self.index > 0 {
-            let block = match chain.get(self.index as usize) {
-                Some(n) => n,
-                None => return Err(BlockError::MismatchPreviousHash),
+            let block = match chain.get((self.index - 1) as u64) {
+                Ok(n) => match n {
+                    Some(n) => n,
+                    None => return Err(BlockError::BlockNotInChain),
+                },
+                Err(e) => {
+                    eprintln!("[#] BLOCK:validate - get block from chain error: {}", e);
+                    return Err(BlockError::BlockNotInChain);
+                }
             };
             if self.previous_hash != block.hash {
                 return Err(BlockError::MismatchPreviousHash);
@@ -287,39 +376,51 @@ impl PartialEq for Block {
 
 #[derive(Clone)]
 pub struct BlockChain {
-    chain: Vec<Block>,
+    heads_db: Db,
+    transactions_db: Db,
+    position_db: Db,
     syncing: Arc<Mutex<SyncState>>,
 }
 
 impl BlockChain {
     /// Constructor
-    pub fn new() -> BlockChain {
-        BlockChain {
-            chain: Vec::new(),
+    pub fn new() -> Result<BlockChain, Box<dyn Error>> {
+        let heads_db = match sled::open(DB_HEAD_PATH.get().unwrap()) {
+            Ok(n) => n,
+            Err(e) => return Err(Box::new(e)),
+        };
+        let transactions_db = match sled::open(DB_TXS_PATH.get().unwrap()) {
+            Ok(n) => n,
+            Err(e) => return Err(Box::new(e)),
+        };
+        let position_db = match sled::open(DB_POS_PATH.get().unwrap()) {
+            Ok(n) => n,
+            Err(e) => return Err(Box::new(e)),
+        };
+        Ok(BlockChain {
+            heads_db,
+            transactions_db,
+            position_db,
             syncing: Arc::new(Mutex::new(SyncState::Ready)),
-        }
+        })
     }
 
-    /// Construct the blockchain with a genisis block.
-    pub fn new_with_genisis() -> BlockChain {
-        // new chain & genisis block
-        let mut chain = Self::new();
-        let mut genisis_block = Block::new(0, vec![], String::new());
-        genisis_block.calc_hash(0); // calc hash of block
-        chain
-            .add_block(&genisis_block)
-            .expect("add genisis block failed");
-        chain
-    }
-
-    /// Adds a block to the chain after checking if it's not already in chain and the index and
+    /// Adds a block to the chain after checking its integrity
     pub fn add_block(&mut self, block: &Block) -> Result<(), BlockChainError> {
         // check if block already in chain
-        if self.chain.contains(block) {
+        if self.contains(block.index) {
             return Err(BlockChainError::BlockAlreadyInChain);
         }
+        // get latest block
+        let latest = match self.last() {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[#] BLOCKCHAIN::add_block - get latest block error: {}", e);
+                return Err(BlockChainError::DatabaseError);
+            }
+        };
         // check integrity
-        match self.chain.last() {
+        match latest {
             Some(n) => {
                 // check index
                 if n.index + 1 != block.index {
@@ -341,13 +442,51 @@ impl BlockChain {
                 }
             }
         }
-        self.chain.push(block.clone()); // add block to chain
+        // split block
+        let (idx, head, txs, pos) = block.to_db_data();
+
+        // insert block heads
+        println!("DEBUG - Insert key: {:?} - val: {:?}", idx, head); // DEBUG
+        let _ = self.heads_db.insert(&idx, head);
+
+        // open transaction trees
+        let transactions_tree = match self.transactions_db.open_tree(&idx) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!(
+                    "[#] BLOCKCHAIN::add_block - open transactions tree error: {}",
+                    e
+                );
+                return Err(BlockChainError::DatabaseError);
+            }
+        };
+        // insert transactions
+        for i in 0..txs.len() {
+            let _ = transactions_tree.insert(&[i as u8], &txs[i]);
+        }
+        // insert positions
+        for (addr, idxs) in pos {
+            // open address tree
+            let positions_tree = match self.position_db.open_tree(&addr) {
+                Ok(n) => n,
+                Err(e) => {
+                    eprintln!(
+                        "[#] BLOCKCHAIN::add_block - open positions tree error: {}",
+                        e
+                    );
+                    return Err(BlockChainError::DatabaseError);
+                }
+            };
+            // update & insert indices
+            let _ = positions_tree.insert(idx, idxs);
+        }
         Ok(())
     }
 
     /// Check if blockchain is synchronized.
     /// Only returns `SyncState::Fine` with an empty list of peers and `SyncState::Needed` with the
     /// corresponding peers.
+    // TODO: check and say until when it's wrong to resync only the wrong part
     pub fn check(&self, peers: &Vec<String>) -> Result<(SyncState, Vec<String>), SyncError> {
         // map latest blocks of the network
         let map = collect_map(&peers, Dtype::GetBlock, "-1");
@@ -358,8 +497,11 @@ impl BlockChain {
             None => return Err(SyncError::InvalidValue),
         };
         // get hash of latest block of local chain
-        let hash_local = match self.get_latest() {
-            Ok(n) => n.hash,
+        let hash_local = match self.last() {
+            Ok(n) => match n {
+                Some(n) => n.hash,
+                None => return Err(SyncError::InvalidValue),
+            },
             Err(_) => {
                 eprintln!("[#] BLOCKCHAIN - check sync get latest block failed");
                 return Err(SyncError::InvalidValue);
@@ -373,38 +515,158 @@ impl BlockChain {
         }
     }
 
+    /// Clear the entire blockchain.
+    fn clear(&mut self) -> Result<(), sled::Error> {
+        // transactions & positions
+        for db in [&self.transactions_db, &self.position_db] {
+            for name in db.tree_names() {
+                if name.starts_with(b"__") {
+                    continue;
+                }
+                match db.drop_tree(name) {
+                    Ok(_) => (),
+                    Err(e) => return Err(e),
+                };
+            }
+        }
+        // heads
+        match self.heads_db.clear() {
+            Ok(_) => (),
+            Err(e) => return Err(e),
+        };
+        Ok(())
+    }
+
+    /// Check if blockchain already contains a block.
+    pub fn contains(&self, idx: u64) -> bool {
+        match self.heads_db.contains_key(&idx.to_be_bytes()) {
+            Ok(n) => {
+                if n {
+                    return true;
+                }
+            }
+            Err(e) => {
+                eprintln!("[#] BLOCKCHAIN - check if block in chain error: {}", e);
+                return true;
+            }
+        };
+        false
+    }
+
+    /// Construct the blockchain with a genisis block.
+    pub fn create_genisis(&mut self) -> Result<(), BlockChainError> {
+        // new chain & genisis block
+        match self.clear() {
+            Ok(_) => (),
+            Err(e) => {
+                eprintln!("[#] BLOCKCHAIN - clear databases error: {}", e);
+                exit(1);
+            }
+        };
+        let mut genisis_block = Block::new(0, vec![], String::new());
+        genisis_block.calc_hash(0); // calc hash of block
+        self.add_block(&mut genisis_block)
+    }
+
     /// Return block by index.
-    pub fn get(&self, idx: usize) -> Option<&Block> {
-        self.chain.get(idx)
-    }
-
-    /// Returns the blockchain.
-    pub fn get_chain(&self) -> Vec<Block> {
-        self.chain.clone()
-    }
-
-    /// Returns the latest block of the chain.
-    pub fn get_latest(&self) -> Result<Block, ()> {
-        // check if none
-        let latest = self.chain.last();
-        if latest.is_none() {
-            Err(())
-        } else {
-            Ok(latest.unwrap().clone())
+    pub fn get(&self, idx: u64) -> Result<Option<Block>, Box<dyn Error>> {
+        // get block head
+        let head = match self.heads_db.get(idx.to_be_bytes()) {
+            Ok(n) => match n {
+                Some(n) => n,
+                None => return Ok(None),
+            },
+            Err(e) => return Err(Box::new(e)),
+        };
+        // get transactions
+        let tx_tree = match self.transactions_db.open_tree(idx.to_be_bytes()) {
+            Ok(n) => n,
+            Err(e) => return Err(Box::new(e)),
+        };
+        // parse transactions
+        let mut tx_data: Vec<IVec> = Vec::new();
+        for i in tx_tree.iter() {
+            let (_, data) = match i {
+                Ok(n) => n,
+                Err(e) => return Err(Box::new(e)),
+            };
+            tx_data.push(data);
+        }
+        // construct block
+        match Block::from_db_data(idx, &head, &tx_data) {
+            Ok(n) => Ok(Some(n)),
+            Err(e) => Err(e),
         }
     }
 
+    /// Returns the latest block of the chain.
+    pub fn last(&self) -> Result<Option<Block>, Box<dyn Error>> {
+        // get block head
+        let (idx, head) = match self.heads_db.last() {
+            Ok(n) => match n {
+                Some(n) => n,
+                None => return Ok(None),
+            },
+            Err(e) => return Err(Box::new(e)),
+        };
+        // get transactions
+        let tx_tree = match self.transactions_db.open_tree(&idx) {
+            Ok(n) => n,
+            Err(e) => return Err(Box::new(e)),
+        };
+        // parse transactions
+        let mut tx_data: Vec<IVec> = Vec::new();
+        for i in tx_tree.iter() {
+            let (_, data) = match i {
+                Ok(n) => n,
+                Err(e) => return Err(Box::new(e)),
+            };
+            tx_data.push(data);
+        }
+        // construct block
+        let idx = match u8_to_u64_vec(&idx) {
+            Ok(n) => n[0],
+            Err(_) => return Err("parse u8 array to u64 error".into()),
+        };
+        match Block::from_db_data(idx, &head, &tx_data) {
+            Ok(n) => Ok(Some(n)),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Get addresses by patterns.
+    fn get_addr_by_pat(&self, pattern: &Vec<u8>) -> Result<Vec<String>, Box<dyn Error>> {
+        let mut out = Vec::new();
+        for i in self.position_db.tree_names() {
+            if addr_to_pattern(&i) == *pattern {
+                match String::from_utf8(i.to_vec()) {
+                    Ok(n) => out.push(n),
+                    Err(e) => return Err(Box::new(e)),
+                }
+            } else {
+                continue;
+            }
+        }
+        Ok(out)
+    }
+
     /// Get amount of coins of an address.
-    // TODO: add checking the timestamp, just return both, current value and pending coins
-    // FIXME: doesn't calculate the fee?
+    // TODO: always check if address really in transaction -> otherwise delete from positions
     pub fn get_balance(&self, addr: &str) -> Result<f64, Box<dyn Error>> {
-        // get balance
+        // get transactions
+        let transactions = match self.get_transactions(addr) {
+            Ok(n) => n,
+            Err(e) => return Err(Box::new(e)),
+        };
+        // calculate value
         let mut value = 0_f64;
-        for block in self.get_chain() {
-            for tx in block.transactions {
-                if tx.src == addr {
-                    value -= tx.val + tx.fee;
-                } else if &tx.dst == addr {
+        let now = timestamp_now();
+        for tx in transactions {
+            if tx.src == addr {
+                value -= tx.val + tx.fee;
+            } else if &tx.dst == addr {
+                // note timestamp
+                if tx.timestamp <= now {
                     value += tx.val;
                 }
             }
@@ -412,19 +674,98 @@ impl BlockChain {
         Ok(value)
     }
 
-    /// Returns a list of transactions where the source address matches a specific pattern.
-    pub fn get_txs_by_pat(&self, pattern: &Vec<u8>) -> Vec<Transaction> {
-        let mut out: Vec<Transaction> = Vec::new();
-        for block in self.get_chain() {
-            for transaction in block.transactions {
-                if pattern == &addr_to_pattern(&transaction.src)
-                    || pattern == &addr_to_pattern(&transaction.dst)
-                {
-                    out.push(transaction)
+    /// Returns a list of transactions of an address.
+    fn get_transactions(&self, addr: &str) -> Result<Vec<Transaction>, sled::Error> {
+        // open positions tree
+        let positions_tree = match self.position_db.open_tree(&addr) {
+            Ok(n) => n,
+            Err(e) => return Err(e),
+        };
+        // iterate through positons
+        let mut out = Vec::new();
+        for i in positions_tree.iter() {
+            // get indices
+            let (block_idx, tx_idxs) = match i {
+                Ok(n) => n,
+                Err(e) => return Err(e),
+            };
+            println!(
+                "DEBUG - get transactions: block idx:{:?}\nDEBUG - get transactions: tx idxs:{:?}",
+                &block_idx, tx_idxs
+            ); // DEBUG
+
+            // get transaction
+            let tx_tree = match self.transactions_db.open_tree(block_idx) {
+                Ok(n) => n,
+                Err(e) => return Err(e),
+            };
+            // DEBUG
+            for i in tx_tree.iter().keys() {
+                println!("DEBUG - get transactions: tx_tree key: {:?}", i.unwrap());
+                // DEBUG
+            }
+            // TODO: I'm not 100% sure if that works, but theoretically it should
+            for x in tx_idxs.to_vec() {
+                let tx_data = match tx_tree.get(&[x]) {
+                    Ok(n) => match n {
+                        Some(n) => n,
+                        None => {
+                            // TODO: remove index from positions db
+                            continue;
+                        }
+                    },
+                    Err(e) => return Err(e),
+                };
+                // construct transaction
+                let tx = match Transaction::from_db_data(&tx_data) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        return Err(sled::Error::Unsupported(format!(
+                            "construct transaction error: {:?}",
+                            e
+                        )))
+                    }
+                };
+                if tx.src != addr || tx.dst != addr {
+                    // TODO: remove index from positions db
                 }
+                out.push(tx);
             }
         }
-        out
+        Ok(out)
+    }
+
+    /// Returns a list of transactions where the source address matches a specific pattern.
+    pub fn get_txs_by_pat(&self, pattern: &Vec<u8>) -> Result<Vec<Transaction>, Box<dyn Error>> {
+        // get addresses
+        let addresses = match self.get_addr_by_pat(pattern) {
+            Ok(n) => n,
+            Err(e) => return Err(e),
+        };
+        println!(
+            "DEBUG - get transactions by pattern: addresses: {:?}",
+            addresses
+        ); // DEBUG
+
+        // get transactions
+        let mut out: Vec<Transaction> = Vec::new();
+        for addr in addresses {
+            let txs = match self.get_transactions(&addr) {
+                Ok(n) => n,
+                Err(e) => return Err(Box::new(e)),
+            };
+            out.extend_from_slice(&txs);
+        }
+        println!(
+            "DEBUG - get transactions by pattern: transactions: {:?}",
+            out
+        ); // DEBUG
+        Ok(out)
+    }
+
+    /// Return the length of the blockchain.
+    pub fn len(&self) -> usize {
+        self.heads_db.len()
     }
 
     // TODO: make it only resync the blocks until the chain was correct
@@ -448,7 +789,7 @@ impl BlockChain {
             }
         }
         println!("[+] BLOCKCHAIN:SYNC - updating blockchain");
-        self.chain.clear(); // clear chain
+        let _ = self.clear(); // TODO: temporary
 
         // get blocks from other node
         let mut length: u64 = 2;
@@ -587,6 +928,7 @@ impl MineController {
     }
 
     /// Construct the command to run the miner.
+    // TODO: I can optimize it by providing only necessary data to the miner
     fn command(start: u64, difficulty: u8, block: Block) -> Result<Child, std::io::Error> {
         // serialize data
         let plain = json!({
@@ -595,7 +937,7 @@ impl MineController {
             "block": block.as_json(),
         })
         .to_string();
-        let data = &STANDARD.encode(plain); // encode using base64
+        let data = &STANDARD.encode(&plain); // encode using base64
 
         // run miner
         Command::new("./target/release/miner")
@@ -633,10 +975,18 @@ impl MineController {
                 }
             };
             // get latest block
-            match chain.get_latest() {
-                Ok(n) => n,
-                Err(_) => {
-                    eprintln!("[#] MINECONTROLLER - get previous block error");
+            match chain.last() {
+                Ok(n) => match n {
+                    Some(n) => n,
+                    None => {
+                        eprintln!(
+                            "[#] MINECONTROLLER - get previous block error: no previous block"
+                        );
+                        return Ok(false);
+                    }
+                },
+                Err(e) => {
+                    eprintln!("[#] MINECONTROLLER - get previous block error: {:?}", e);
                     return Ok(false);
                 }
             }
@@ -671,9 +1021,9 @@ impl MineController {
 
     // TODO: split some functionality of this function in multiple functions
     /// Run the miner.
-    pub fn run(&self, genisis: bool) {
+    pub fn run(&self, genisis: bool, sync: bool) {
         // synchronize block to mine
-        if !genisis {
+        if !genisis && sync {
             match self.sync(&self.current_block) {
                 Ok(_) => {
                     println!("DEBUG - currently mined block synchronized"); // DEBUG
@@ -775,6 +1125,10 @@ impl MineController {
                     }
                     // decode base64
                     let buf = read.join().unwrap();
+
+                    // DEBUG
+                    println!("DEBUG - miner's block:\n{}", buf);
+
                     let decoded = match STANDARD.decode(buf.as_bytes()) {
                         Ok(n) => n,
                         Err(e) => {
@@ -782,16 +1136,8 @@ impl MineController {
                             break None;
                         }
                     };
-                    // convert u8 vector to string
-                    let json_string = match String::from_utf8(decoded) {
-                        Ok(n) => n,
-                        Err(e) => {
-                            eprintln!("[#] MINER - convert utf8 error: {}", e);
-                            break None;
-                        }
-                    };
-                    // parse string to json
-                    let json: MineReceiver = match serde_json::from_str(&json_string) {
+                    // parse to json
+                    let json: MineReceiver = match serde_json::from_slice(&decoded) {
                         Ok(n) => n,
                         Err(e) => {
                             eprintln!("[#] MINER - parse json error: {}", e);
@@ -804,11 +1150,13 @@ impl MineController {
                     block.merkle = json.merkle;
                     break Some(block);
                 };
-                if block.is_none() {
-                    eprintln!("[#] MINER - retireve block error");
-                    break;
-                }
-                let block = block.unwrap();
+                let block = match block {
+                    Some(n) => n,
+                    None => {
+                        eprintln!("[#] MINER - retrieve block error");
+                        break;
+                    }
+                };
                 {
                     // validate block
                     match block.validate(&self_arc.blockchain.lock().unwrap()) {
@@ -1166,6 +1514,22 @@ impl Transaction {
         verifier.verify(&self.signature)
     }
 
+    /// Construct a transaction from database serialized data.
+    pub fn from_db_data(data: &IVec) -> Result<Self, Box<dyn Any + Send>> {
+        // parse to string
+        let data = match String::from_utf8(data.to_vec()) {
+            Ok(n) => n,
+            Err(e) => return Err(Box::new(e)),
+        };
+        // parse to json
+        let json = match serde_json::Value::from_str(&data) {
+            Ok(n) => n,
+            Err(e) => return Err(Box::new(e)),
+        };
+        // construct transaction
+        Self::from_json(&json)
+    }
+
     /// Construct a transaction from json.
     pub fn from_json(json: &serde_json::Value) -> Result<Transaction, Box<dyn Any + Send>> {
         catch_unwind(|| {
@@ -1247,6 +1611,11 @@ impl Transaction {
             "{}-{}-{}-{}-{}-{:#?}",
             self.src, self.dst, self.timestamp, self.fee, self.val, self.pub_key
         )
+    }
+
+    /// Serialize the transaction for storing it in the database.
+    pub fn to_db_data(&self) -> IVec {
+        IVec::from(self.as_json().to_string().as_bytes())
     }
 
     /// Check entire transaction.
@@ -1570,7 +1939,6 @@ impl TransactionPool {
 impl std::fmt::Display for TransactionPool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut output = String::new();
-
         for i in &self.pool {
             output = format!("{}\n{}", output, i);
         }

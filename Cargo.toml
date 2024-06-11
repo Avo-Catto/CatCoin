@@ -23,6 +23,7 @@ rocket = "0.5.0"
 aes-gcm = "0.10.3"
 rpassword = "7.3.1"
 md5 = "0.7.0"
+sled = "0.34.7"
 
 [dependencies.uuid]
 version = "1.7.0"

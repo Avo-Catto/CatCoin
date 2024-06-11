@@ -25,7 +25,7 @@ fn main() {
     share::init();
     let args = unsafe { share::ARGS.get().unwrap().to_owned() };
     let addr = share::ADDR.get().unwrap().to_string();
-    if !args.genisis {
+    if !args.genisis && args.sync {
         // synchronize args
         match sync_args(&args.entry) {
             Ok(n) => match n {
@@ -50,16 +50,33 @@ fn main() {
         }
     }
     // construct mutex objects
+    let blockchain = match BlockChain::new() {
+        Ok(mut n) => {
+            // add genisis block if necessary
+            if args.genisis {
+                match n.create_genisis() {
+                    Ok(_) => (),
+                    Err(e) => {
+                        eprintln!("[#] BLOCKCHAIN:SETUP - create genisis block error: {}", e);
+                        exit(1);
+                    }
+                }
+            }
+            n
+        }
+        Err(e) => {
+            eprintln!("[#] BLOCKCHAIN:SETUP - load blockchain error: {}", e);
+            exit(1);
+        }
+    };
+    let blockchain = Arc::new(Mutex::new(blockchain));
+    let last_check = Arc::new(Mutex::new(0_u64));
     let difficulty = Arc::new(Mutex::new(args.difficulty));
     let peers = Arc::new(Mutex::new(Vec::<String>::new()));
     let transactionpool = Arc::new(Mutex::new(TransactionPool::new(args.tx_per_block)));
-    let blockchain = match args.genisis {
-        true => Arc::new(Mutex::new(BlockChain::new_with_genisis())),
-        false => Arc::new(Mutex::new(BlockChain::new())),
-    };
 
     // synchronize blockchain
-    if !args.genisis && check_ip(&args.entry) {
+    if args.sync && check_ip(&args.entry) {
         match blockchain.lock().unwrap().sync(&args.entry) {
             Ok(n) => match n {
                 SyncState::Ready => (),
@@ -71,13 +88,9 @@ fn main() {
                 exit(1);
             }
         }
-    // if no entry node specified
-    } else if !args.genisis {
-        eprintln!("[#] BLOCKCHAIN:SYNC - no entry node specified");
-        exit(1);
     }
     // synchronize transaction pool
-    if !args.genisis {
+    if args.sync {
         match transactionpool.lock().unwrap().sync(&args.entry) {
             Ok(n) => match n {
                 SyncState::Ready => (),
@@ -111,7 +124,7 @@ fn main() {
         &difficulty,
     ));
     // start mining
-    mine_controller.run(args.genisis);
+    mine_controller.run(args.genisis, args.sync);
 
     {
         // DEBUG
@@ -123,10 +136,11 @@ fn main() {
 
     // log stuff
     {
+        // TODO: error handling???
         println!("[+] SETUP - listening on: {}", addr);
         println!(
             "[+] SETUP - genisis hash: {}",
-            blockchain.lock().unwrap().get_latest().unwrap().hash
+            blockchain.lock().unwrap().last().unwrap().unwrap().hash
         );
         println!("[+] MINER - target value: {:?}", {
             difficulty_from_u8(*difficulty.lock().unwrap())
@@ -143,6 +157,7 @@ fn main() {
         let transactionpool = Arc::clone(&transactionpool);
         let blockchain = Arc::clone(&blockchain);
         let mine_controller = Arc::clone(&mine_controller);
+        let last_check = Arc::clone(&last_check);
 
         // spawn thread and handle connection
         let _ = thread::spawn(move || {
@@ -262,10 +277,19 @@ fn main() {
                     }
                 }
 
-                // TODO: prevent dos attack here
                 Dtype::CheckSync => {
-                    respond(&stream, CheckSyncResponse::OK);
-
+                    {
+                        // check if synced too recently
+                        let index = mine_controller.current_block.lock().unwrap().index;
+                        let mut last = last_check.lock().unwrap();
+                        if index < (*last + args.checklock as u64) {
+                            respond(&stream, CheckSyncResponse::Blocked);
+                            return;
+                        } else {
+                            respond(&stream, CheckSyncResponse::OK);
+                            *last = index;
+                        }
+                    }
                     // synchronize node if necessary
                     let peers = peers.lock().unwrap();
                     {
@@ -371,7 +395,7 @@ fn main() {
                 Dtype::GetBlock => {
                     // lock chain & parse index
                     let chain = blockchain.lock().unwrap();
-                    let length = chain.get_chain().len();
+                    let length = chain.len();
                     if request.data == "-2" {
                         // currently mined block
                         let block = mine_controller.current_block.lock().unwrap().clone();
@@ -394,32 +418,27 @@ fn main() {
                             }
                         };
                         // check if index in range
-                        if idx > chain.get_chain().len() - 1 {
+                        if idx > chain.len() - 1 {
                             respond(&stream, "");
                         }
                         // get block and respond
-                        match chain.get(idx) {
-                            Some(n) => {
-                                let json = json!({
-                                    "block": n.as_json(),
-                                    "len": length,
-                                });
-                                println!("DEBUG - get block: {}", json.to_string());
-                                respond(&stream, json.to_string());
+                        match chain.get(idx as u64) {
+                            Ok(n) => match n {
+                                Some(n) => respond(
+                                    &stream,
+                                    json!({"block": n.as_json(), "len": length}).to_string(),
+                                ),
+                                None => respond(&stream, ""),
+                            },
+                            Err(e) => {
+                                eprintln!(
+                                    "DTYPE:GetBlock - retrieve block from database error: {}",
+                                    e
+                                );
+                                respond(&stream, "");
                             }
-                            None => respond(&stream, ""),
                         };
                     }
-                }
-
-                Dtype::GetBlockchain => {
-                    let chain = blockchain.lock().unwrap();
-                    let blocks: Vec<String> = chain
-                        .get_chain()
-                        .iter()
-                        .map(|x| x.as_json().to_string()) // parse blocks to json
-                        .collect();
-                    respond(&stream, blocks);
                 }
 
                 Dtype::GetCoinbaseAddress => respond(&stream, COINBASE.get().unwrap()),
@@ -442,29 +461,30 @@ fn main() {
                 Dtype::GetPeers => respond(&stream, peers.lock().unwrap()),
 
                 Dtype::GetTransactions => {
-                    // parse received patterns
+                    // parse received pattern
                     let pattern: Vec<u8> = match serde_json::from_str(&request.data) {
                         Ok(n) => n,
                         Err(e) => {
                             eprintln!("[#] DTYPE:GetTransactions - parse error: {}", e);
-                            respond::<Vec<Transaction>>(&stream, Vec::new());
+                            respond::<Vec<String>>(&stream, Vec::new());
                             return;
                         }
                     };
-                    // search for transactions using the patterns
                     let chain = { blockchain.lock().unwrap().clone() };
 
-                    println!(
-                        "DEBUG - get transactions by pattern: {:?}",
-                        chain.get_txs_by_pat(&pattern)
-                    ); // DEBUG
-
-                    let transactions: Vec<String> = chain
-                        .get_txs_by_pat(&pattern)
-                        .iter()
-                        .map(|x| x.as_json().to_string()) // parse transaction to json
-                        .collect();
-                    respond(&stream, transactions)
+                    // retrieve transactions based on the pattern
+                    let transactions: Vec<String> = match chain.get_txs_by_pat(&pattern) {
+                        Ok(n) => {
+                            // parse transaction to json
+                            n.iter().map(|x| x.as_json().to_string()).collect()
+                        }
+                        Err(e) => {
+                            eprintln!("[#] DTYPE:GetTransactions - retrieve transactions by pattern error: {}", e);
+                            respond::<Vec<String>>(&stream, Vec::new());
+                            return;
+                        }
+                    };
+                    respond(&stream, transactions);
                 }
 
                 Dtype::GetTransactionPool => {
@@ -478,7 +498,6 @@ fn main() {
                     respond(&stream, transactionpool.lock().unwrap().tx_per_block);
                 }
 
-                // TODO: handle coinbase transaction - the destination address will be different
                 Dtype::PostBlock => {
                     // load data as json
                     let data = match serde_json::Value::from_str(&request.data) {
@@ -564,25 +583,16 @@ fn main() {
     }
 }
 
+// TODO: it can happen when a node has a block with a different transaction, the position database
+//       would contain errors - a simple remove of the index when address not there would be enough
 // TODO: other todos
+// TODO: no transactions of amount 0 or same src and dst
+// TODO: optimize miner command
+// TODO: partial transactions request (balance) - see client
 // TODO: make the node only resyncing until it's valid again
-// TODO: store the blockchain in a file or maybe multiple files
-// TODO: make difficulty automatically adjustable (maybe by amount of miners)
-// TODO: add pool feature where nodes have ID's to mine more efficiently
+// TODO: make difficulty automatically adjusted
 // TODO: add Docs to functions
+// TODO: client
 // TODO: improve logging -> write a logger
-// TODO: licency
-//
-// TODO: in far future:
-// - check if miner is compiled -> if not then compile it and run the binary instead of cargo
-// - remove debug print statements
-//
-// TODO: Optional:
-// - if one thread panics or exits the other one should stop too
-// - encrypt traffic between nodes?
-// - full and half nodes..?
-//
-// TODO: configs that should be available:
-// - amount of transactions
-// - sleep time between reading stdout / stdin of miner
-// - time that should be aimed for every block
+// TODO: remove debug print statements
+// TODO: GitHub licency

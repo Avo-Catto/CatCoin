@@ -6,7 +6,7 @@ use std::{sync::OnceLock, usize};
 
 use console::*;
 use node::comm::{receive, request, AddTransactionResponse, Dtype, Request};
-use wallet::{check_wallet_exists, gen_address, gen_salt, get_balance, request_fee, Wallet};
+use wallet::{check_wallet_exists, gen_address, gen_salt, get_balance, request_fee, test, Wallet};
 
 const USER_PATH: &'static str = "client/data/passwd";
 const KEY_PATH: &'static str = "client/data/keys";
@@ -370,12 +370,14 @@ fn main() {
                 }
             }
             "whoami" => output(&user.username),
+            "test" => test(),
             _ => continue,
         }
     }
 }
 
 // MINDSET: you write quality code, not quick and bad code!
-// TODO: adjust node
 // TODO: one error logging
+// TODO: save index of block and balance until where balance was received, so I don't have to
+// request the entire chain again (get balance partially) - would include sending the index
 // TODO: improve user experience
