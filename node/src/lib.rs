@@ -99,7 +99,10 @@ pub mod share {
     pub static DB_TXS_PATH: OnceLock<String> = OnceLock::new();
 
     fn parse_args() -> Args_ {
-        let args = Args::parse();
+        let mut args = Args::parse();
+        if !args.genisis && args.port != 8000 {
+            args.sync = true;
+        }
         Args_ {
             ip: args.ip,
             port: args.port,

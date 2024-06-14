@@ -1,7 +1,7 @@
 extern crate base64;
 extern crate rand;
 use self::base64::{engine::general_purpose::STANDARD, Engine};
-use self::rand::{seq::SliceRandom, thread_rng, Rng};
+use self::rand::{prelude::SliceRandom, thread_rng, Rng};
 use crate::{
     comm::*,
     share::{ADDR, ARGS, COINBASE, DB_HEAD_PATH, DB_POS_PATH, DB_TXS_PATH},
@@ -11,9 +11,9 @@ use openssl::{error::ErrorStack, hash::MessageDigest, pkey::PKey, sign::Verifier
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sled::{Db, IVec};
-use std::collections::HashMap;
 use std::{
     any::Any,
+    collections::HashMap,
     error::Error,
     io::{BufReader, BufWriter, Read, Write},
     panic::catch_unwind,
@@ -114,7 +114,7 @@ impl Block {
             transactions: txs,
             previous_hash: head.previous_hash.clone(),
             nonce: head.nonce,
-            hash: String::new(),
+            hash: head.hash,
             merkle: head.merkle.clone(),
             hash_str: format!(
                 "{}${}${}${}",
@@ -407,6 +407,8 @@ impl BlockChain {
 
     /// Adds a block to the chain after checking its integrity
     pub fn add_block(&mut self, block: &Block) -> Result<(), BlockChainError> {
+        println!("DEBUG - try to add block:\n{}", block); // DEBUG
+
         // check if block already in chain
         if self.contains(block.index) {
             return Err(BlockChainError::BlockAlreadyInChain);
@@ -422,6 +424,8 @@ impl BlockChain {
         // check integrity
         match latest {
             Some(n) => {
+                println!("DEBUG - add block check integrity latest:\n{}", n); // DEBUG
+
                 // check index
                 if n.index + 1 != block.index {
                     return Err(BlockChainError::InvalidIndex);
@@ -447,6 +451,11 @@ impl BlockChain {
 
         // insert block heads
         println!("DEBUG - Insert key: {:?} - val: {:?}", idx, head); // DEBUG
+        println!(
+            "DEBUG - Insert key: {:?} - val: {:?}",
+            u8_to_u64_vec(&idx),
+            String::from_utf8(head.to_vec())
+        ); // DEBUG
         let _ = self.heads_db.insert(&idx, head);
 
         // open transaction trees
@@ -484,42 +493,194 @@ impl BlockChain {
     }
 
     /// Check if blockchain is synchronized.
-    /// Only returns `SyncState::Fine` with an empty list of peers and `SyncState::Needed` with the
-    /// corresponding peers.
-    // TODO: check and say until when it's wrong to resync only the wrong part
-    pub fn check(&self, peers: &Vec<String>) -> Result<(SyncState, Vec<String>), SyncError> {
+    /// Only returns `SyncState::Fine` with an empty list of peers and an index of 0.
+    /// Returns `SyncState::Needed` with the corresponding peers and the index to start syncing
+    /// from.
+    // FIXME: throws error at initial sync
+    pub fn check(&self, peers: &Vec<String>) -> Result<(SyncState, Vec<String>, u64), CheckError> {
         // map latest blocks of the network
         let map = collect_map(&peers, Dtype::GetBlock, "-1");
+
+        println!("DEBUG - peers: {:?}", peers); // DEBUG
 
         // get hash of latest block that most nodes share
         let hash_network = match get_key_by_vec_len(map.clone()) {
             Some(n) => n,
-            None => return Err(SyncError::InvalidValue),
+            None => return Err(CheckError::GetValueNone),
         };
-        // get hash of latest block of local chain
-        let hash_local = match self.last() {
+        println!("DEBUG - check chain: 1"); // DEBUG
+
+        // get latest block of local chain
+        let latest_block = match self.last() {
             Ok(n) => match n {
-                Some(n) => n.hash,
-                None => return Err(SyncError::InvalidValue),
+                Some(n) => n,
+                None => return Ok((SyncState::Needed, map[&hash_network].clone(), 0)),
             },
-            Err(_) => {
-                eprintln!("[#] BLOCKCHAIN - check sync get latest block failed");
-                return Err(SyncError::InvalidValue);
+            Err(e) => {
+                eprintln!("[#] BLOCKCHAIN - check sync get latest block error: {}", e);
+                return Err(CheckError::GetValueError);
             }
         };
+
+        println!("DEBUG - check chain: 2"); // DEBUG
+
         // check equality of hash
-        if hash_local == hash_network {
-            Ok((SyncState::Fine, vec![]))
-        } else {
-            Ok((SyncState::Needed, map[&hash_network].clone()))
+        if latest_block.hash == hash_network {
+            return Ok((SyncState::Fine, vec![], 0));
         }
+        // otherwise determine index of start of invalid chain
+        // choose peer
+        let peer = match map[&hash_network].choose(&mut thread_rng()) {
+            Some(n) => n,
+            None => unsafe { &ARGS.get().unwrap().entry },
+        };
+        // craft request
+        let req = Request {
+            dtype: Dtype::GetBlock,
+            data: "-1",
+            addr: peer.to_owned(),
+        };
+        // request latest block
+        let stream = match request(peer, &req) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[#] BLOCKCHAIN - check sync request block error: {}", e);
+                return Err(CheckError::Request);
+            }
+        };
+        println!("DEBUG - check chain: 3"); // DEBUG
+
+        // receive latest block
+        let res: Response<String> = match receive(stream) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[#] BLOCKCHAIN - check sync receive block error: {}", e);
+                return Err(CheckError::Receive);
+            }
+        };
+        println!("debug - check chain: 4"); // debug
+
+        // parse to json
+        let data: GetBlockReceiver = match serde_json::from_str(&res.res) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!(
+                    "[#] BLOCKCHAIN - check sync parse response to json error: {}",
+                    e
+                );
+                return Err(CheckError::ParseJson);
+            }
+        };
+        println!("debug - check chain: 5"); // debug
+
+        // request blocks backwards until matching
+        let mut idx: u64 = data.len - 1;
+        loop {
+            let (mut hash1, mut hash2) = (String::new(), String::new());
+            for peer in &map[&hash_network] {
+                // craft request
+                let req = Request {
+                    dtype: Dtype::GetBlock,
+                    data: idx.to_string(),
+                    addr: peer.to_owned(),
+                };
+                // request block
+                let stream = match request(&peer, &req) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        eprintln!("[#] BLOCKCHAIN - check sync request block error: {}", e);
+                        return Err(CheckError::Request);
+                    }
+                };
+                println!("debug - check chain: 6"); // debug
+
+                // receive block
+                let res: Response<String> = match receive(stream) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        eprintln!("[#] BLOCKCHAIN - check sync receive block error: {}", e);
+                        return Err(CheckError::Receive);
+                    }
+                };
+
+                // DEBUG
+                println!("DEBUG - received block as bytes: {:?}", res.res);
+
+                // parse to json
+                let data: GetBlockReceiver = match serde_json::from_str(&res.res) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        eprintln!(
+                            "[#] BLOCKCHAIN - check sync parse response to json error: {}",
+                            e
+                        );
+                        return Err(CheckError::ParseJson);
+                    }
+                };
+
+                println!("DEBUG - check chain: 7"); // DEBUG
+                println!("DEBUG - check chain: block data:\n{:#?}", &data.block); // DEBUG
+
+                // construct block
+                let block = match Block::from_json(&data.block) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        eprintln!("[#] BLOCKCHAIN - check sync construct block error: {:?}", e);
+                        return Err(CheckError::Construction);
+                    }
+                };
+                // get hash of local block
+                let local_hash = match self.get(block.index) {
+                    Ok(n) => match n {
+                        Some(n) => n.hash,
+                        None => {
+                            println!(
+                                "DEBUG - check chain: get block {} from chain is none",
+                                block.index
+                            ); // DEBUG
+                            String::new()
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("[#] BLOCKCHAIN - check sync get block error: {:?}", e);
+                        return Err(CheckError::GetValueError);
+                    }
+                };
+                println!("DEBUG - check chain: 8"); // debug
+                println!(
+                    "DEBUG - check chain: local: {} - hash: {}",
+                    block.index, local_hash
+                ); // DEBUG
+                println!(
+                    "DEBUG - check chain: network: {} - hash: {}",
+                    block.index, block.hash
+                ); // DEBUG
+
+                // compare
+                hash1 = block.hash;
+                hash2 = local_hash;
+                if hash1 == hash2 || idx == 0 {
+                    break;
+                }
+                // decrease index
+                idx -= 1;
+            }
+            if hash1 == hash2 || idx == 0 {
+                break;
+            }
+        }
+        Ok((SyncState::Needed, map[&hash_network].clone(), idx))
     }
 
     /// Clear the entire blockchain.
-    fn clear(&mut self) -> Result<(), sled::Error> {
+    fn clear(&self) -> Result<(), sled::Error> {
         // transactions & positions
         for db in [&self.transactions_db, &self.position_db] {
             for name in db.tree_names() {
+                println!(
+                    "DEBUG - clear remove tree: {:?}",
+                    String::from_utf8(name.to_vec())
+                ); // DEBUG
                 if name.starts_with(b"__") {
                     continue;
                 }
@@ -528,12 +689,21 @@ impl BlockChain {
                     Err(e) => return Err(e),
                 };
             }
+            match db.flush() {
+                Ok(_) => (),
+                Err(e) => return Err(e),
+            }
         }
         // heads
         match self.heads_db.clear() {
             Ok(_) => (),
             Err(e) => return Err(e),
         };
+        match self.heads_db.flush() {
+            Ok(_) => (),
+            Err(e) => return Err(e),
+        }
+        println!("[#] BLOCKCHAIN - clear databases successful");
         Ok(())
     }
 
@@ -565,6 +735,7 @@ impl BlockChain {
         };
         let mut genisis_block = Block::new(0, vec![], String::new());
         genisis_block.calc_hash(0); // calc hash of block
+        println!("DEBUG - genisis block:\n{}", genisis_block);
         self.add_block(&mut genisis_block)
     }
 
@@ -578,6 +749,8 @@ impl BlockChain {
             },
             Err(e) => return Err(Box::new(e)),
         };
+        println!("DEBUG - get: {:?}", String::from_utf8(head.to_vec())); // DEBUG
+
         // get transactions
         let tx_tree = match self.transactions_db.open_tree(idx.to_be_bytes()) {
             Ok(n) => n,
@@ -651,7 +824,6 @@ impl BlockChain {
     }
 
     /// Get amount of coins of an address.
-    // TODO: always check if address really in transaction -> otherwise delete from positions
     pub fn get_balance(&self, addr: &str) -> Result<f64, Box<dyn Error>> {
         // get transactions
         let transactions = match self.get_transactions(addr) {
@@ -704,15 +876,11 @@ impl BlockChain {
                 println!("DEBUG - get transactions: tx_tree key: {:?}", i.unwrap());
                 // DEBUG
             }
-            // TODO: I'm not 100% sure if that works, but theoretically it should
             for x in tx_idxs.to_vec() {
                 let tx_data = match tx_tree.get(&[x]) {
                     Ok(n) => match n {
                         Some(n) => n,
-                        None => {
-                            // TODO: remove index from positions db
-                            continue;
-                        }
+                        None => continue,
                     },
                     Err(e) => return Err(e),
                 };
@@ -726,9 +894,6 @@ impl BlockChain {
                         )))
                     }
                 };
-                if tx.src != addr || tx.dst != addr {
-                    // TODO: remove index from positions db
-                }
                 out.push(tx);
             }
         }
@@ -768,7 +933,49 @@ impl BlockChain {
         self.heads_db.len()
     }
 
-    // TODO: make it only resync the blocks until the chain was correct
+    /// Remove a block from the chain.
+    fn remove(&self, idx: u64) -> Result<(), sled::Error> {
+        // remove head
+        match self.heads_db.remove(&idx.to_be_bytes()) {
+            Ok(_) => (),
+            Err(e) => return Err(e),
+        }
+        // remove transactions
+        match self.transactions_db.drop_tree(&idx.to_be_bytes()) {
+            Ok(_) => (),
+            Err(e) => return Err(e),
+        }
+        // remove positions - I know it's not the most efficient way
+        for i in self.position_db.tree_names() {
+            let tree = match self.position_db.open_tree(i) {
+                Ok(n) => n,
+                Err(e) => return Err(e),
+            };
+            match tree.remove(&idx.to_be_bytes()) {
+                Ok(_) => (),
+                Err(e) => return Err(e),
+            };
+        }
+        Ok(())
+    }
+
+    /// Remove all blocks until a specific index from chain.
+    fn remove_until(&self, idx: u64) -> Result<(), sled::Error> {
+        println!("DEBUG - REMOVE UNTIL: {}", idx); // DEBUG
+        if idx == 0 {
+            return self.clear();
+        }
+        let length = self.len() as u64;
+        for i in idx..length {
+            println!("DEBUG - remove: {}", i); // DEBUG
+            match self.remove(i) {
+                Ok(_) => (),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
     /// Synchronize blockchain by a node.
     /// Everything is fine if it returns:
     ///
@@ -776,7 +983,7 @@ impl BlockChain {
     ///     `SyncState::Ready`      - it's done
     ///
     /// Everything else is either not returned or is an error.
-    pub fn sync(&mut self, addr: &str) -> Result<SyncState, Box<dyn Error>> {
+    pub fn sync(&mut self, addr: &str, mut idx: u64) -> Result<SyncState, Box<dyn Error>> {
         {
             // check if currently syncing
             let mut state = self.syncing.lock().unwrap();
@@ -789,12 +996,26 @@ impl BlockChain {
             }
         }
         println!("[+] BLOCKCHAIN:SYNC - updating blockchain");
-        let _ = self.clear(); // TODO: temporary
+
+        // remove blocks
+        let length = self.len() as u64;
+        println!("DEBUG - sync: length: {}", length); // debug
+        println!("DEBUG - sync: idx: {}", idx); // debug
+        match self.remove_until(idx) {
+            Ok(_) => (),
+            Err(e) => {
+                eprintln!(
+                    "[#] BLOCKCHAIN:SYNC - remove blocks from chain error: {}",
+                    e
+                );
+                return Err(Box::new(e));
+            }
+        }
+        let length = self.len() as u64; // DEBUG
+        println!("DEBUG - sync: length: {}", length); // debug
 
         // get blocks from other node
-        let mut length: u64 = 2;
-        let mut idx: u64 = 0;
-
+        let mut length = idx + 1;
         while idx < length {
             // craft request
             let req = Request {
@@ -829,6 +1050,9 @@ impl BlockChain {
                     continue;
                 }
             };
+            // update length
+            length = data.len;
+
             // construct block
             let block = match Block::from_json(&data.block) {
                 Ok(n) => n,
@@ -842,11 +1066,12 @@ impl BlockChain {
             match self.add_block(&block) {
                 Ok(_) => {
                     idx += 1;
-                    length = data.len;
-                    println!("[+] BLOCKCHAIN:SYNC - [ {} / {} ]", idx, length); // TODO: make it
-                                                                                // steps
+                    println!("[+] BLOCKCHAIN:SYNC - [ {} / {} ]", idx, length);
                 }
-                Err(e) => eprintln!("[#] BLOCKCHAIN:SYNC - adding block error: {}", e),
+                Err(e) => {
+                    eprintln!("[#] BLOCKCHAIN:SYNC - adding block error: {}", e);
+                    exit(1); // DEBUG
+                }
             }
         }
         println!("[+] BLOCKCHAIN:SYNC - blockchain update successful");
@@ -1125,10 +1350,6 @@ impl MineController {
                     }
                     // decode base64
                     let buf = read.join().unwrap();
-
-                    // DEBUG
-                    println!("DEBUG - miner's block:\n{}", buf);
-
                     let decoded = match STANDARD.decode(buf.as_bytes()) {
                         Ok(n) => n,
                         Err(e) => {
@@ -1172,8 +1393,7 @@ impl MineController {
                     let responses: Vec<Response<PostBlockResponse>>;
                     let failed: Vec<String>;
 
-                    let (peers, responses) = {
-                        println!("DEBUG - checking responses of nodes!"); // debug
+                    let responses = {
                         let mut peers = self_arc.peers.lock().unwrap(); // lock peers
 
                         // broadcast block
@@ -1183,16 +1403,12 @@ impl MineController {
                             &block.as_json().to_string(),
                         );
                         *peers = subtract_vec(peers.to_vec(), failed); // update peers
-                        (peers, responses) // return peers
+                        responses // return peers
                     };
 
                     // declare variables for check
                     let mut agree: Vec<String> = Vec::new();
                     let mut disagree: Vec<String> = Vec::new();
-
-                    // DEBUG
-                    println!("DEBUG - peers: {:?}", peers);
-                    println!("DEBUG - responses: {:?}", responses);
 
                     // deserialize responses
                     for res in responses {
@@ -1202,10 +1418,6 @@ impl MineController {
                             disagree.push(res.addr);
                         }
                     }
-
-                    // DEBUG
-                    println!("DEBUG - agree: {:?}", agree);
-                    println!("DEBUG - disagree: {:?}", disagree);
 
                     // compare responses
                     if disagree.len() > (agree.len() + disagree.len()) / 2 {
@@ -1243,11 +1455,11 @@ impl MineController {
                 {
                     // blockchain
                     let mut chain = self_arc.blockchain.lock().unwrap();
-                    let (state, peers) = match chain.check(&peers) {
+                    let (state, peers, idx) = match chain.check(&peers) {
                         Ok(n) => n,
                         Err(e) => {
                             eprintln!("[#] MINER - check blockchain error: {:?}", e);
-                            (SyncState::Error, vec![])
+                            (SyncState::Error, vec![], 0)
                         }
                     };
                     if state != SyncState::Error {
@@ -1259,6 +1471,7 @@ impl MineController {
                                     peers.choose(&mut thread_rng()).expect(
                                         "[#] MINER - random peer for blockchain sync error",
                                     ),
+                                    idx,
                                 ) {
                                     Ok(n) => match n {
                                         SyncState::Ready => (),

@@ -24,7 +24,7 @@ struct ArgsReceiver {
     fee: u8,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 pub struct BlockHead {
     pub hash: String,
     pub merkle: String,
@@ -67,6 +67,23 @@ impl std::fmt::Display for BlockChainError {
     }
 }
 impl std::error::Error for BlockChainError {}
+
+#[derive(Debug)]
+pub enum CheckError {
+    Construction,
+    GetValueError,
+    GetValueNone,
+    ParseJson,
+    Receive,
+    Request,
+}
+
+impl std::fmt::Display for CheckError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+impl std::error::Error for CheckError {}
 
 #[derive(Debug)]
 pub enum SyncError {

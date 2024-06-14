@@ -220,7 +220,7 @@ where
 
 pub fn request<T>(addr: &str, req: &Request<T>) -> Result<TcpStream, Box<dyn Error>>
 where
-    T: serde::Serialize,
+    T: serde::Serialize + ToString,
 {
     // connect to node
     let mut stream = match TcpStream::connect(addr) {

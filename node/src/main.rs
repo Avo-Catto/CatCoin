@@ -75,32 +75,8 @@ fn main() {
     let peers = Arc::new(Mutex::new(Vec::<String>::new()));
     let transactionpool = Arc::new(Mutex::new(TransactionPool::new(args.tx_per_block)));
 
-    // synchronize blockchain
+    // synchronize everything
     if args.sync && check_ip(&args.entry) {
-        match blockchain.lock().unwrap().sync(&args.entry) {
-            Ok(n) => match n {
-                SyncState::Ready => (),
-                SyncState::Running => (),
-                _ => panic!("[#] BLOCKCHAIN:SYNC - synchronization failed: {:?}", n),
-            },
-            Err(e) => {
-                eprintln!("[#] BLOCKCHAIN:SYNC - synchronization error: {}", e);
-                exit(1);
-            }
-        }
-    }
-    // synchronize transaction pool
-    if args.sync {
-        match transactionpool.lock().unwrap().sync(&args.entry) {
-            Ok(n) => match n {
-                SyncState::Ready => (),
-                _ => panic!("[#] TRANSACTIONPOOL:SYNC - synchronization failed: {:?}", n),
-            },
-            Err(e) => {
-                eprintln!("[#] TRANSACTIONPOOL:SYNC - synchronization error: {}", e);
-                exit(1);
-            }
-        }
         // synchronize peers
         match sync_peers(&args.entry, &addr, &peers) {
             Ok(n) => match n {
@@ -109,6 +85,42 @@ fn main() {
             },
             Err(e) => {
                 eprintln!("[#] PEERS:SYNC - synchronization error: {}", e);
+                exit(1);
+            }
+        }
+        // check if synchronization is needed
+        let mut chain = blockchain.lock().unwrap();
+        let (state, peers, idx) = match chain.check(&peers.lock().unwrap()) {
+            Ok(n) => n,
+            Err(e) => panic!("[#] BLOCKCHAIN:SYNC - check chain error: {}", e),
+        };
+        // choose peer
+        let peer = match peers.choose(&mut thread_rng()) {
+            Some(n) => n,
+            None => &args.entry,
+        };
+        // synchronize blockchain if needed
+        if state == SyncState::Needed {
+            match chain.sync(peer, idx) {
+                Ok(n) => match n {
+                    SyncState::Ready => (),
+                    SyncState::Running => (),
+                    _ => panic!("[#] BLOCKCHAIN:SYNC - synchronization failed: {:?}", n),
+                },
+                Err(e) => {
+                    eprintln!("[#] BLOCKCHAIN:SYNC - synchronization error: {}", e);
+                    exit(1);
+                }
+            }
+        }
+        // synchronize transaction pool
+        match transactionpool.lock().unwrap().sync(peer) {
+            Ok(n) => match n {
+                SyncState::Ready => (),
+                _ => panic!("[#] TRANSACTIONPOOL:SYNC - synchronization failed: {:?}", n),
+            },
+            Err(e) => {
+                eprintln!("[#] TRANSACTIONPOOL:SYNC - synchronization error: {}", e);
                 exit(1);
             }
         }
@@ -136,7 +148,6 @@ fn main() {
 
     // log stuff
     {
-        // TODO: error handling???
         println!("[+] SETUP - listening on: {}", addr);
         println!(
             "[+] SETUP - genisis hash: {}",
@@ -295,20 +306,24 @@ fn main() {
                     {
                         // blockchain
                         let mut chain = blockchain.lock().unwrap();
-                        let (state, peers) = match chain.check(&peers) {
+                        let (state, peers, idx) = match chain.check(&peers) {
                             Ok(n) => n,
                             Err(e) => {
                                 eprintln!("[#] DTYPE:CheckSync - check blockchain error: {:?}", e);
-                                (SyncState::Error, vec![])
+                                (SyncState::Error, vec![], 0)
                             }
                         };
                         if state != SyncState::Error {
                             match state {
                                 SyncState::Fine => println!("[+] BLOCKCHAIN - state: fine"),
                                 SyncState::Needed => {
+                                    // choose peer
+                                    let peer = match peers.choose(&mut thread_rng()) {
+                                        Some(n) => n,
+                                        None => &args.entry,
+                                    };
                                     // sync blockchain
-                                    match chain.sync(peers.choose(&mut thread_rng())
-                                        .expect("[#] DTYPE:CheckSync - random peer for blockchain sync error")) {
+                                    match chain.sync(peer, idx) {
                                         Ok(n) => match n {
                                             SyncState::Ready => (),
                                             SyncState::Running => (),
@@ -424,11 +439,14 @@ fn main() {
                         // get block and respond
                         match chain.get(idx as u64) {
                             Ok(n) => match n {
-                                Some(n) => respond(
-                                    &stream,
-                                    json!({"block": n.as_json(), "len": length}).to_string(),
-                                ),
-                                None => respond(&stream, ""),
+                                Some(n) => {
+                                    println!("DEBUG - requested block:\n{}", n); // DEBUG
+                                    respond(
+                                        &stream,
+                                        json!({"block": n.as_json(), "len": length}).to_string(),
+                                    )
+                                }
+                                None => respond(&stream, " "),
                             },
                             Err(e) => {
                                 eprintln!(
@@ -542,8 +560,8 @@ fn main() {
                             return;
                         }
                     }
-                    // check block
                     {
+                        // check block
                         match block.validate(&blockchain.lock().unwrap()) {
                             Ok(_) => println!("[+] DTYPE:PostBlock - block valid"),
                             Err(e) => {
@@ -583,16 +601,16 @@ fn main() {
     }
 }
 
-// TODO: it can happen when a node has a block with a different transaction, the position database
-//       would contain errors - a simple remove of the index when address not there would be enough
 // TODO: other todos
+// TODO: with every mined block a miner process is spawned but seems to be not deleted???
+//       no matter what, I don't think that's beneficial for a long chain and many nodes
 // TODO: no transactions of amount 0 or same src and dst
 // TODO: optimize miner command
 // TODO: partial transactions request (balance) - see client
-// TODO: make the node only resyncing until it's valid again
 // TODO: make difficulty automatically adjusted
 // TODO: add Docs to functions
 // TODO: client
-// TODO: improve logging -> write a logger
+// TODO: improve logging -> write a logger or at least generalize the logging
 // TODO: remove debug print statements
 // TODO: GitHub licency
+// TODO: block from slice?
