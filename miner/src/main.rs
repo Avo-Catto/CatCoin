@@ -4,21 +4,25 @@ extern crate num_bigint;
 extern crate serde;
 extern crate serde_json;
 use base64::{engine::general_purpose::STANDARD, Engine};
-use node::{blockchain::Block, utils::difficulty_from_u8};
+use node::utils::{difficulty_from_u8, hash_str};
 use num_bigint::BigUint;
 use serde::Deserialize;
-use serde_json::json;
-use std::{env, io::stdin, process::exit, thread};
+use std::{
+    env,
+    io::{stderr, stdin, stdout, Write},
+    process::exit,
+    thread,
+};
 
 #[derive(Debug, Deserialize)]
 struct Receiver {
-    block: serde_json::Value,
+    hash_data: String,
     difficulty: u8,
     start: u64,
 }
 
 /// Mine the given block.
-fn mine(target_val: BigUint, block: &mut Block, mut start: u64) {
+fn mine(target_val: BigUint, hash_data: &str, mut start: u64) -> u64 {
     let check_skip = thread::spawn(|| match stdin().read_line(&mut String::new()) {
         Ok(_) => (),
         Err(e) => eprintln!(
@@ -27,15 +31,24 @@ fn mine(target_val: BigUint, block: &mut Block, mut start: u64) {
         ),
     });
     // enter loop
-    let mut val = difficulty_from_u8(0);
-    while val > target_val {
+    loop {
         // check if skipped
         if check_skip.is_finished() {
             exit(0);
         }
         // calculate hash and get value
-        val = BigUint::parse_bytes(block.calc_hash(start).as_bytes(), 16).unwrap();
-
+        let hash = hash_str(format!("{}${}", hash_data, start).as_bytes());
+        let val = match BigUint::parse_bytes(hash.as_bytes(), 16) {
+            Some(n) => n,
+            None => {
+                let _ = stderr().write_all(b"[#] MINERBIN - parse hash to value error");
+                exit(1);
+            }
+        };
+        // check value
+        if val <= target_val {
+            break;
+        }
         // check if nonce exeeds data type
         if start == u64::MAX {
             start = 0
@@ -43,39 +56,40 @@ fn mine(target_val: BigUint, block: &mut Block, mut start: u64) {
             start += 1;
         }
     }
+    start
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect(); // collect args
     let decoded = STANDARD.decode(&args[1]).unwrap(); // decode base64
-    let json_string = match String::from_utf8(decoded) {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!("[#] MINERBIN - string from bytes error: {}", e);
-            exit(1);
-        }
-    };
-    // deserialize to json
-    let json: Receiver = serde_json::from_str(&json_string).unwrap();
 
-    // construct block from json
-    let mut block = match Block::from_json(&json.block) {
+    // deserialize to json
+    let json: Receiver = match serde_json::from_slice(&decoded) {
         Ok(n) => n,
         Err(e) => {
-            eprint!("[#] MINERBIN - construct block from json error: {:?}", e);
+            let _ =
+                stderr().write_all(format!("[#] MINERBIN - parse to json error: {}", e).as_bytes());
             exit(1);
         }
     };
     // hash block
-    mine(difficulty_from_u8(json.difficulty), &mut block, json.start);
-
+    let nonce = mine(
+        difficulty_from_u8(json.difficulty),
+        &json.hash_data,
+        json.start,
+    );
     // serialize output
-    let json = json!({
-        "hash": &block.hash,
-        "merkle": &block.merkle,
-        "nonce": &block.nonce,
-    });
-    let encoded = STANDARD.encode(format!("{}", json));
-    print!("{}", encoded); // return data
+    match stdout().write_all(&nonce.to_be_bytes()) {
+        Ok(_) => (),
+        Err(e) => {
+            let _ = stderr().write_all(
+                format!(
+                    "[#] MINERBING - write encoded output into stdout error: {}",
+                    e
+                )
+                .as_bytes(),
+            );
+        }
+    };
     exit(0);
 }

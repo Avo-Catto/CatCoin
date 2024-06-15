@@ -377,7 +377,9 @@ fn main() {
 }
 
 // MINDSET: you write quality code, not quick and bad code!
+// TODO: test transactions per block limitation
 // TODO: one error logging
+// TODO: differentiate timestamp so (coins pending and current)
 // TODO: save index of block and balance until where balance was received, so I don't have to
 // request the entire chain again (get balance partially) - would include sending the index
 // TODO: improve user experience

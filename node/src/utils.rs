@@ -235,8 +235,11 @@ pub fn compile_miner() -> Result<(), Box<dyn Error>> {
 
 /// Collect all responses and addresses of nodes on a specific request. The response will be the
 /// key and the list of peers who sent the same responses will be the value.
-pub fn collect_map(peers: &Vec<String>, dtype: Dtype, data: &str) -> HashMap<String, Vec<String>> {
-    let (responses, _) = broadcast::<String>(peers, dtype, data);
+pub fn collect_map<T>(peers: &Vec<String>, dtype: Dtype, data: &str) -> HashMap<T, Vec<String>>
+where
+    T: serde::de::DeserializeOwned + std::hash::Hash + std::cmp::Eq + std::fmt::Debug,
+{
+    let (responses, _) = broadcast::<T>(peers, dtype, data);
     let mut collection = HashMap::new();
     for i in responses {
         // check if hash already in map and add address otherwise create new entry
@@ -297,18 +300,21 @@ pub fn get_fees(txs: &Vec<Transaction>) -> f64 {
 }
 
 /// Function to get the key of a HashMap by the length of the value.
-pub fn get_key_by_vec_len<V>(map: HashMap<String, Vec<V>>) -> Option<String> {
+pub fn get_key_by_vec_len<T>(map: HashMap<T, Vec<String>>) -> Option<T>
+where
+    T: std::hash::Hash + std::cmp::Eq + Clone,
+{
     let mut max = match map.keys().last() {
-        Some(n) => n.to_string(),
+        Some(n) => n,
         None => return None,
     };
     for key in map.keys() {
         // check if length of vec is greater
         if map[key].len() > map[&max].len() {
-            max = key.clone();
+            max = key;
         }
     }
-    Some(max)
+    Some(max.clone())
 }
 
 /// Get the timestamp by human notation.
@@ -380,7 +386,8 @@ pub fn merkle_hash(data: Vec<String>) -> Option<String> {
     }
 }
 
-// Convert an u8 array to an u64 vector.
+/// Convert an u8 array to an u64 vector.
+// TODO: u64::from_be_bytes(&buf)
 pub fn u8_to_u64_vec(val: &[u8]) -> Result<Vec<u64>, Box<dyn Error>> {
     if val.len() % 8 != 0 {
         return Err(format!("invalid chunk size: {}", val.len()).into());

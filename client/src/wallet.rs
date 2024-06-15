@@ -833,10 +833,14 @@ pub fn timestamp_now() -> i64 {
 }
 
 pub fn test() {
+    for i in 0..4 {
+        println!("{}", i);
+    }
+
     // craft request
     let req = Request {
-        dtype: Dtype::CheckSync,
-        data: "",
+        dtype: Dtype::GetBlock,
+        data: "3",
         addr: String::new(),
     };
     // send request
@@ -855,5 +859,5 @@ pub fn test() {
             return;
         }
     };
-    print!("DEBUG - OUTPUT: {:?}", res);
+    print!("DEBUG - OUTPUT:\n{:#?}\n", res);
 }

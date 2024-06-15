@@ -34,7 +34,7 @@ pub struct Block {
     pub nonce: u64,
     pub hash: String,
     pub merkle: String,
-    hash_str: String,
+    pub hash_str: String,
 }
 
 impl Block {
@@ -234,7 +234,6 @@ impl Block {
                 None => Vec::new(),
             };
             val.push(idx);
-            println!("DEBUG - to db data src: {:?}", val); // DEBUG
             positions.insert(tx.src.clone(), val);
 
             // destination
@@ -243,7 +242,6 @@ impl Block {
                 None => Vec::new(),
             };
             val.push(idx);
-            println!("DEBUG - to db data dst: {:?}", val); // DEBUG
             positions.insert(tx.dst.clone(), val);
 
             // parse to bytes
@@ -424,8 +422,6 @@ impl BlockChain {
         // check integrity
         match latest {
             Some(n) => {
-                println!("DEBUG - add block check integrity latest:\n{}", n); // DEBUG
-
                 // check index
                 if n.index + 1 != block.index {
                     return Err(BlockChainError::InvalidIndex);
@@ -450,12 +446,6 @@ impl BlockChain {
         let (idx, head, txs, pos) = block.to_db_data();
 
         // insert block heads
-        println!("DEBUG - Insert key: {:?} - val: {:?}", idx, head); // DEBUG
-        println!(
-            "DEBUG - Insert key: {:?} - val: {:?}",
-            u8_to_u64_vec(&idx),
-            String::from_utf8(head.to_vec())
-        ); // DEBUG
         let _ = self.heads_db.insert(&idx, head);
 
         // open transaction trees
@@ -496,20 +486,15 @@ impl BlockChain {
     /// Only returns `SyncState::Fine` with an empty list of peers and an index of 0.
     /// Returns `SyncState::Needed` with the corresponding peers and the index to start syncing
     /// from.
-    // FIXME: throws error at initial sync
     pub fn check(&self, peers: &Vec<String>) -> Result<(SyncState, Vec<String>, u64), CheckError> {
         // map latest blocks of the network
-        let map = collect_map(&peers, Dtype::GetBlock, "-1");
-
-        println!("DEBUG - peers: {:?}", peers); // DEBUG
+        let map = collect_map::<String>(&peers, Dtype::GetBlock, "-1");
 
         // get hash of latest block that most nodes share
         let hash_network = match get_key_by_vec_len(map.clone()) {
             Some(n) => n,
             None => return Err(CheckError::GetValueNone),
         };
-        println!("DEBUG - check chain: 1"); // DEBUG
-
         // get latest block of local chain
         let latest_block = match self.last() {
             Ok(n) => match n {
@@ -521,9 +506,6 @@ impl BlockChain {
                 return Err(CheckError::GetValueError);
             }
         };
-
-        println!("DEBUG - check chain: 2"); // DEBUG
-
         // check equality of hash
         if latest_block.hash == hash_network {
             return Ok((SyncState::Fine, vec![], 0));
@@ -548,8 +530,6 @@ impl BlockChain {
                 return Err(CheckError::Request);
             }
         };
-        println!("DEBUG - check chain: 3"); // DEBUG
-
         // receive latest block
         let res: Response<String> = match receive(stream) {
             Ok(n) => n,
@@ -558,8 +538,6 @@ impl BlockChain {
                 return Err(CheckError::Receive);
             }
         };
-        println!("debug - check chain: 4"); // debug
-
         // parse to json
         let data: GetBlockReceiver = match serde_json::from_str(&res.res) {
             Ok(n) => n,
@@ -571,8 +549,6 @@ impl BlockChain {
                 return Err(CheckError::ParseJson);
             }
         };
-        println!("debug - check chain: 5"); // debug
-
         // request blocks backwards until matching
         let mut idx: u64 = data.len - 1;
         loop {
@@ -592,8 +568,6 @@ impl BlockChain {
                         return Err(CheckError::Request);
                     }
                 };
-                println!("debug - check chain: 6"); // debug
-
                 // receive block
                 let res: Response<String> = match receive(stream) {
                     Ok(n) => n,
@@ -602,10 +576,6 @@ impl BlockChain {
                         return Err(CheckError::Receive);
                     }
                 };
-
-                // DEBUG
-                println!("DEBUG - received block as bytes: {:?}", res.res);
-
                 // parse to json
                 let data: GetBlockReceiver = match serde_json::from_str(&res.res) {
                     Ok(n) => n,
@@ -617,10 +587,6 @@ impl BlockChain {
                         return Err(CheckError::ParseJson);
                     }
                 };
-
-                println!("DEBUG - check chain: 7"); // DEBUG
-                println!("DEBUG - check chain: block data:\n{:#?}", &data.block); // DEBUG
-
                 // construct block
                 let block = match Block::from_json(&data.block) {
                     Ok(n) => n,
@@ -633,29 +599,13 @@ impl BlockChain {
                 let local_hash = match self.get(block.index) {
                     Ok(n) => match n {
                         Some(n) => n.hash,
-                        None => {
-                            println!(
-                                "DEBUG - check chain: get block {} from chain is none",
-                                block.index
-                            ); // DEBUG
-                            String::new()
-                        }
+                        None => String::new(),
                     },
                     Err(e) => {
                         eprintln!("[#] BLOCKCHAIN - check sync get block error: {:?}", e);
                         return Err(CheckError::GetValueError);
                     }
                 };
-                println!("DEBUG - check chain: 8"); // debug
-                println!(
-                    "DEBUG - check chain: local: {} - hash: {}",
-                    block.index, local_hash
-                ); // DEBUG
-                println!(
-                    "DEBUG - check chain: network: {} - hash: {}",
-                    block.index, block.hash
-                ); // DEBUG
-
                 // compare
                 hash1 = block.hash;
                 hash2 = local_hash;
@@ -677,10 +627,6 @@ impl BlockChain {
         // transactions & positions
         for db in [&self.transactions_db, &self.position_db] {
             for name in db.tree_names() {
-                println!(
-                    "DEBUG - clear remove tree: {:?}",
-                    String::from_utf8(name.to_vec())
-                ); // DEBUG
                 if name.starts_with(b"__") {
                     continue;
                 }
@@ -749,8 +695,6 @@ impl BlockChain {
             },
             Err(e) => return Err(Box::new(e)),
         };
-        println!("DEBUG - get: {:?}", String::from_utf8(head.to_vec())); // DEBUG
-
         // get transactions
         let tx_tree = match self.transactions_db.open_tree(idx.to_be_bytes()) {
             Ok(n) => n,
@@ -1083,13 +1027,6 @@ impl BlockChain {
     }
 }
 
-#[derive(Deserialize)]
-struct MineReceiver {
-    nonce: u64,
-    hash: String,
-    merkle: String,
-}
-
 #[derive(Clone)]
 pub struct MineController {
     pub wallet: Arc<String>,
@@ -1134,7 +1071,7 @@ impl MineController {
     /// corresponding peers.
     pub fn check(&self, peers: &Vec<String>) -> Result<(SyncState, Vec<String>), SyncError> {
         // map currently mined blocks of the network
-        let map = collect_map(&peers, Dtype::GetBlock, "-2");
+        let map = collect_map::<String>(&peers, Dtype::GetBlock, "-2");
 
         // get hash of latest block that most nodes share
         let hash_network = match get_key_by_vec_len(map.clone()) {
@@ -1153,13 +1090,12 @@ impl MineController {
     }
 
     /// Construct the command to run the miner.
-    // TODO: I can optimize it by providing only necessary data to the miner
     fn command(start: u64, difficulty: u8, block: Block) -> Result<Child, std::io::Error> {
         // serialize data
         let plain = json!({
             "start": start,
             "difficulty": difficulty,
-            "block": block.as_json(),
+            "hash_data": block.hash_str,
         })
         .to_string();
         let data = &STANDARD.encode(&plain); // encode using base64
@@ -1169,6 +1105,7 @@ impl MineController {
             .args([data])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
     }
 
@@ -1281,26 +1218,20 @@ impl MineController {
                     println!("DEBUG - currenlty mined block: \n{}", block);
 
                     // set up miner
-                    let miner: Option<Child> = {
+                    let mut miner: Child = {
                         let mut rng = thread_rng();
                         match MineController::command(
                             rng.gen(), // random number
                             *self_arc.difficulty.lock().unwrap(),
                             block.clone(),
                         ) {
-                            Ok(n) => Some(n),
+                            Ok(n) => n,
                             Err(e) => {
                                 eprintln!("[#] MINER - error: {}", e);
                                 break None;
                             }
                         }
                     };
-                    // ensure miner
-                    if miner.is_none() {
-                        break None;
-                    }
-                    let mut miner = miner.unwrap();
-
                     // start mining
                     println!("[+] MINER - mining...");
 
@@ -1322,8 +1253,8 @@ impl MineController {
                     let read = {
                         let stdout = Arc::clone(&stdout);
                         thread::spawn(move || {
-                            let mut buf = String::new();
-                            let _ = stdout.lock().unwrap().read_to_string(&mut buf);
+                            let mut buf = Vec::new();
+                            let _ = stdout.lock().unwrap().read_to_end(&mut buf);
                             buf
                         })
                     };
@@ -1342,33 +1273,34 @@ impl MineController {
                         }
                         thread::sleep(*self_arc.sleep);
                     }
+                    // kill process
+                    match miner.kill() {
+                        Ok(_) => (),
+                        Err(e) => eprintln!("[#] MINER - kill child process error: {}", e),
+                    }
+                    match miner.wait() {
+                        Ok(_) => (),
+                        Err(e) => eprintln!("[#] MINER - child process exit error: {}", e),
+                    }
                     // ensure check_skip thread is finished
                     if !check_skip.is_finished() {
                         self_arc.send_stop();
                     } else {
                         continue;
                     }
-                    // decode base64
+                    // process output
                     let buf = read.join().unwrap();
-                    let decoded = match STANDARD.decode(buf.as_bytes()) {
+                    let foo: [u8; 8] = match buf.try_into() {
                         Ok(n) => n,
-                        Err(e) => {
-                            eprintln!("[#] MINER - decode base64 error: {}", e);
-                            break None;
+                        Err(_) => {
+                            eprintln!("[#] MINER - parse bytes to nonce error");
+                            exit(1);
                         }
                     };
-                    // parse to json
-                    let json: MineReceiver = match serde_json::from_slice(&decoded) {
-                        Ok(n) => n,
-                        Err(e) => {
-                            eprintln!("[#] MINER - parse json error: {}", e);
-                            break None;
-                        }
-                    };
+                    let nonce = u64::from_be_bytes(foo);
+
                     // update block
-                    block.nonce = json.nonce;
-                    block.hash = json.hash;
-                    block.merkle = json.merkle;
+                    block.calc_hash(nonce);
                     break Some(block);
                 };
                 let block = match block {
@@ -1392,7 +1324,6 @@ impl MineController {
                     // broadcast block & update peers
                     let responses: Vec<Response<PostBlockResponse>>;
                     let failed: Vec<String>;
-
                     let responses = {
                         let mut peers = self_arc.peers.lock().unwrap(); // lock peers
 
@@ -1405,7 +1336,6 @@ impl MineController {
                         *peers = subtract_vec(peers.to_vec(), failed); // update peers
                         responses // return peers
                     };
-
                     // declare variables for check
                     let mut agree: Vec<String> = Vec::new();
                     let mut disagree: Vec<String> = Vec::new();
@@ -1418,7 +1348,6 @@ impl MineController {
                             disagree.push(res.addr);
                         }
                     }
-
                     // compare responses
                     if disagree.len() > (agree.len() + disagree.len()) / 2 {
                         println!("[+] MINER - synchronize node...");
@@ -1981,7 +1910,7 @@ impl TransactionPool {
     /// corresponding peers.
     pub fn check(&self, peers: &Vec<String>) -> Result<(SyncState, Vec<String>), SyncError> {
         // map transactionpool merkle hashes
-        let map = collect_map(&peers, Dtype::GetPoolHash, "");
+        let map = collect_map::<String>(&peers, Dtype::GetPoolHash, "");
 
         // get hash of latest block that most nodes share
         let hash_network = match get_key_by_vec_len(map.clone()) {
@@ -2003,15 +1932,9 @@ impl TransactionPool {
             return Ok((SyncState::Needed, map[&hash_network].clone()));
         }
         // check transactions per block
-        let map = collect_map(&peers, Dtype::GetTransactionsPerBlock, "");
-        let network_txpb: u16 = match get_key_by_vec_len(map.clone()) {
-            Some(n) => match n.parse() {
-                Ok(n) => n,
-                Err(e) => {
-                    eprintln!("[#] TRANSACTIONPOOL:CHECK - parse txpb to int error: {}", e);
-                    return Err(SyncError::InvalidValue);
-                }
-            },
+        let map_txpb = collect_map::<u16>(&peers, Dtype::GetTransactionsPerBlock, "");
+        let network_txpb: u16 = match get_key_by_vec_len(map_txpb) {
+            Some(n) => n,
             None => {
                 eprintln!("[#] TRANSACTIONPOOL:CHECK - check transactions per block failed");
                 return Err(SyncError::InvalidValue);

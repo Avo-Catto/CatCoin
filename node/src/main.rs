@@ -151,7 +151,7 @@ fn main() {
         println!("[+] SETUP - listening on: {}", addr);
         println!(
             "[+] SETUP - genisis hash: {}",
-            blockchain.lock().unwrap().last().unwrap().unwrap().hash
+            blockchain.lock().unwrap().get(0).unwrap().unwrap().hash
         );
         println!("[+] MINER - target value: {:?}", {
             difficulty_from_u8(*difficulty.lock().unwrap())
@@ -601,13 +601,11 @@ fn main() {
     }
 }
 
-// TODO: other todos
-// TODO: with every mined block a miner process is spawned but seems to be not deleted???
-//       no matter what, I don't think that's beneficial for a long chain and many nodes
-// TODO: no transactions of amount 0 or same src and dst
-// TODO: optimize miner command
+// > TODO: make difficulty automatically adjusted
 // TODO: partial transactions request (balance) - see client
-// TODO: make difficulty automatically adjusted
+// TODO: no transactions of amount 0 or same src and dst
+
+// TODO: other todos
 // TODO: add Docs to functions
 // TODO: client
 // TODO: improve logging -> write a logger or at least generalize the logging
