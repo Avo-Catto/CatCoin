@@ -6,7 +6,9 @@ use std::{sync::OnceLock, usize};
 
 use console::*;
 use node::comm::{receive, request, AddTransactionResponse, Dtype, Request};
-use wallet::{check_wallet_exists, gen_address, gen_salt, get_balance, request_fee, test, Wallet};
+use wallet::{
+    check_wallet_exists, gen_address, gen_salt, get_balance, request_fee, test, test1, Wallet,
+};
 
 const USER_PATH: &'static str = "client/data/passwd";
 const KEY_PATH: &'static str = "client/data/keys";
@@ -370,7 +372,8 @@ fn main() {
                 }
             }
             "whoami" => output(&user.username),
-            "test" => test(),
+            "test" => test(&user.wallet),
+            "test1" => test1(),
             _ => continue,
         }
     }

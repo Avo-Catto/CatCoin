@@ -2,7 +2,8 @@ pub mod blockchain;
 pub mod comm;
 pub mod utils;
 pub mod share {
-    use crate::utils::{gen_address, sync_coinbase};
+    use crate::utils::{difficulty_from_u8, gen_address, get_timestamp, sync_coinbase};
+    use astro_float::BigFloat;
     use chrono::Utc;
     use clap::Parser;
     use openssl::pkey::PKey;
@@ -27,11 +28,16 @@ pub mod share {
 
         /// entry from node to join the network
         #[arg(short, long, default_value_t = String::from("127.0.0.1:8000"))]
-        entry: String,
+        node: String,
 
-        /// hash difficulty
-        #[arg(short, long, default_value_t = 14)]
-        difficulty: u8,
+        /// expected time to mine a block
+        /// 2m:3h:5d:2w - valid after 2 minutes, 3 hours, 5 days, 2 weeks
+        #[arg(short, long, default_value_t = String::from("10m"))]
+        expected: String,
+
+        /// initial difficulty to start with
+        #[arg(short, long, default_value_t = 15)]
+        difficulty_initial: u8,
 
         /// max amount of transactions per block
         #[arg(short, long, default_value_t = 20)]
@@ -67,8 +73,9 @@ pub mod share {
         pub ip: String,
         pub port: u16,
         pub genisis: bool,
-        pub entry: String,
-        pub difficulty: u8,
+        pub node: String,
+        pub expected: u64,
+        pub difficulty_initial: u8,
         pub tx_per_block: u16,
         pub wallet: String,
         pub reward: f64,
@@ -81,7 +88,7 @@ pub mod share {
         /// Return the necessary information for synchronization as json.
         pub fn as_json(&self) -> serde_json::Value {
             json!({
-                "difficulty": self.difficulty,
+                "expected": self.expected,
                 "tx_per_block": self.tx_per_block,
                 "reward": self.reward,
                 "halving": self.halving,
@@ -93,22 +100,40 @@ pub mod share {
     pub static mut ARGS: OnceLock<Args_> = OnceLock::new();
     pub static ADDR: OnceLock<String> = OnceLock::new();
     pub static COINBASE: OnceLock<String> = OnceLock::new();
-    pub static FEE: OnceLock<u8> = OnceLock::new();
     pub static DB_HEAD_PATH: OnceLock<String> = OnceLock::new();
     pub static DB_POS_PATH: OnceLock<String> = OnceLock::new();
     pub static DB_TXS_PATH: OnceLock<String> = OnceLock::new();
+    pub static mut DIFFICULTY: OnceLock<BigFloat> = OnceLock::new();
+    pub static FEE: OnceLock<u8> = OnceLock::new();
 
     fn parse_args() -> Args_ {
         let mut args = Args::parse();
         if !args.genisis && args.port != 8000 {
             args.sync = true;
         }
+        let expected = match get_timestamp(&args.expected) {
+            Ok(n) => match (n).try_into() {
+                Ok(n) => n,
+                Err(e) => {
+                    eprintln!(
+                        "[#] ARGS - convert exptected time (difficulty) to unsigned error: {}",
+                        e
+                    );
+                    exit(1);
+                }
+            },
+            Err(e) => {
+                eprintln!("[#] ARGS - get exptected time (difficulty) error: {}", e);
+                exit(1);
+            }
+        };
         Args_ {
             ip: args.ip,
             port: args.port,
             genisis: args.genisis,
-            entry: args.entry,
-            difficulty: args.difficulty,
+            node: args.node,
+            expected,
+            difficulty_initial: args.difficulty_initial,
             tx_per_block: args.txpb,
             wallet: args.wallet,
             reward: args.reward,
@@ -126,7 +151,7 @@ pub mod share {
             let args = ARGS.get().unwrap();
 
             // check args
-            if args.difficulty < 1 || args.difficulty > 71 {
+            if args.difficulty_initial < 1 || args.difficulty_initial > 71 {
                 eprintln!("[#] ARGS - invalid difficulty (allowed: 1 - 71)");
                 exit(1);
             }
@@ -137,14 +162,17 @@ pub mod share {
             // format address
             ADDR.get_or_init(|| format!("{}:{}", args.ip, args.port));
 
-            // set fee
+            // initialize fee
             FEE.get_or_init(|| args.fee);
+
+            // initialize difficulty
+            DIFFICULTY.get_or_init(|| difficulty_from_u8(args.difficulty_initial));
 
             // set coinbase address
             let args = ARGS.get().unwrap();
             if !args.genisis && args.sync {
                 // synchronize address
-                match sync_coinbase(&args.entry) {
+                match sync_coinbase(&args.node) {
                     Ok(_) => (),
                     Err(e) => {
                         eprintln!("[#] COINBASE - sync error: {}", e);
@@ -158,7 +186,7 @@ pub mod share {
                 let pub_key = priv_key.public_key_to_pem().unwrap();
                 let address = gen_address(&pub_key, 16, &c);
 
-                // initialize
+                // initialize coinbase address
                 COINBASE.get_or_init(|| address);
             }
         }

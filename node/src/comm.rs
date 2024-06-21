@@ -105,6 +105,7 @@ pub enum Dtype {
     GetArgs,
     GetBlock,
     GetCoinbaseAddress,
+    GetDifficulty,
     GetFee,
     GetPeers,
     GetPoolHash,

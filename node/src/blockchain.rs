@@ -2,6 +2,7 @@ extern crate base64;
 extern crate rand;
 use self::base64::{engine::general_purpose::STANDARD, Engine};
 use self::rand::{prelude::SliceRandom, thread_rng, Rng};
+use crate::share::DIFFICULTY;
 use crate::{
     comm::*,
     share::{ADDR, ARGS, COINBASE, DB_HEAD_PATH, DB_POS_PATH, DB_TXS_PATH},
@@ -11,6 +12,7 @@ use openssl::{error::ErrorStack, hash::MessageDigest, pkey::PKey, sign::Verifier
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sled::{Db, IVec};
+use std::process::ChildStderr;
 use std::{
     any::Any,
     collections::HashMap,
@@ -405,8 +407,6 @@ impl BlockChain {
 
     /// Adds a block to the chain after checking its integrity
     pub fn add_block(&mut self, block: &Block) -> Result<(), BlockChainError> {
-        println!("DEBUG - try to add block:\n{}", block); // DEBUG
-
         // check if block already in chain
         if self.contains(block.index) {
             return Err(BlockChainError::BlockAlreadyInChain);
@@ -514,7 +514,7 @@ impl BlockChain {
         // choose peer
         let peer = match map[&hash_network].choose(&mut thread_rng()) {
             Some(n) => n,
-            None => unsafe { &ARGS.get().unwrap().entry },
+            None => unsafe { &ARGS.get().unwrap().node },
         };
         // craft request
         let req = Request {
@@ -1034,7 +1034,6 @@ pub struct MineController {
     blockchain: Arc<Mutex<BlockChain>>,
     transactionpool: Arc<Mutex<TransactionPool>>,
     peers: Arc<Mutex<Vec<String>>>,
-    difficulty: Arc<Mutex<u8>>,
     run_send: Arc<Mutex<mpsc::Sender<bool>>>,
     run_recv: Arc<Mutex<mpsc::Receiver<bool>>>,
     pub current_block: Arc<Mutex<Block>>,
@@ -1049,7 +1048,6 @@ impl MineController {
         blockchain: &Arc<Mutex<BlockChain>>,
         transactionpool: &Arc<Mutex<TransactionPool>>,
         peers: &Arc<Mutex<Vec<String>>>,
-        difficulty: &Arc<Mutex<u8>>,
     ) -> Self {
         let (send, recv) = mpsc::channel();
         MineController {
@@ -1058,7 +1056,6 @@ impl MineController {
             blockchain: blockchain.clone(),
             transactionpool: transactionpool.clone(),
             peers: peers.clone(),
-            difficulty: difficulty.clone(),
             run_send: Arc::new(Mutex::new(send)),
             run_recv: Arc::new(Mutex::new(recv)),
             current_block: Arc::new(Mutex::new(Block::default())),
@@ -1090,11 +1087,11 @@ impl MineController {
     }
 
     /// Construct the command to run the miner.
-    fn command(start: u64, difficulty: u8, block: Block) -> Result<Child, std::io::Error> {
+    fn command(start: u64, block: Block) -> Result<Child, std::io::Error> {
         // serialize data
         let plain = json!({
             "start": start,
-            "difficulty": difficulty,
+            "difficulty": unsafe { DIFFICULTY.get().unwrap().to_string() },
             "hash_data": block.hash_str,
         })
         .to_string();
@@ -1209,7 +1206,14 @@ impl MineController {
         }
         let self_arc: Arc<MineController> = Arc::new(self.clone());
         thread::spawn(move || {
+            let mut times: Vec<f64> = Vec::with_capacity(2);
             loop {
+                // measurements
+                let start_nonce: u64 = thread_rng().gen(); // calculate hashrate based on incrementation
+                                                           // since start value
+                let start_time = timestamp_now();
+
+                let mut stderr: Option<ChildStderr> = None;
                 let block: Option<Block> = loop {
                     // get block to mine
                     let mut block = { self_arc.current_block.lock().unwrap().clone() };
@@ -1219,12 +1223,7 @@ impl MineController {
 
                     // set up miner
                     let mut miner: Child = {
-                        let mut rng = thread_rng();
-                        match MineController::command(
-                            rng.gen(), // random number
-                            *self_arc.difficulty.lock().unwrap(),
-                            block.clone(),
-                        ) {
+                        match MineController::command(start_nonce, block.clone()) {
                             Ok(n) => n,
                             Err(e) => {
                                 eprintln!("[#] MINER - error: {}", e);
@@ -1232,6 +1231,8 @@ impl MineController {
                             }
                         }
                     };
+                    stderr = miner.stderr.take();
+
                     // start mining
                     println!("[+] MINER - mining...");
 
@@ -1286,15 +1287,43 @@ impl MineController {
                     if !check_skip.is_finished() {
                         self_arc.send_stop();
                     } else {
+                        times.push(timestamp_now() as f64 - start_time as f64);
+                        println!("DEBUG - times: {:?}", times); // DEBUG
+
+                        if times.len() % 2 == 0 {
+                            let expected = unsafe { ARGS.get().unwrap().expected };
+                            println!("DEBUG - expected: {}", expected); // DEBUG
+                            let difficulty = calc_new_target(expected, &times);
+                            println!("DEBUG - new difficulty: {:?}", difficulty); // DEBUG
+                            times.clear();
+
+                            unsafe {
+                                // update difficulty
+                                match DIFFICULTY.get_mut() {
+                                    Some(n) => {
+                                        *n = match difficulty {
+                                            Ok(n) => n,
+                                            Err(_) => {
+                                                eprintln!("[#] MINER - calculate difficulty error");
+                                                n.to_owned()
+                                            }
+                                        }
+                                    }
+                                    None => eprintln!("[#] MINER - update difficulty error"),
+                                }
+                            }
+                        }
+
+                        println!("DEBUG - here I could measure the time"); // DEBUG
                         continue;
                     }
                     // process output
                     let buf = read.join().unwrap();
                     let foo: [u8; 8] = match buf.try_into() {
                         Ok(n) => n,
-                        Err(_) => {
-                            eprintln!("[#] MINER - parse bytes to nonce error");
-                            exit(1);
+                        Err(e) => {
+                            eprintln!("[#] MINER - parse bytes to nonce error: {:?}", e);
+                            break None;
                         }
                     };
                     let nonce = u64::from_be_bytes(foo);
@@ -1303,10 +1332,21 @@ impl MineController {
                     block.calc_hash(nonce);
                     break Some(block);
                 };
+                // measure time
+                let stop_time = timestamp_now();
+
+                // retrieve block
                 let block = match block {
                     Some(n) => n,
                     None => {
-                        eprintln!("[#] MINER - retrieve block error");
+                        let mut buf = String::new();
+                        match stderr {
+                            Some(mut n) => {
+                                let _ = n.read_to_string(&mut buf);
+                                eprintln!("{}", buf);
+                            }
+                            None => eprintln!("[#] MINER - retrieve block error"),
+                        }
                         break;
                     }
                 };
@@ -1317,6 +1357,49 @@ impl MineController {
                         Err(e) => {
                             eprintln!("[#] MINER - block invalid: {:?}", e);
                             break;
+                        }
+                    }
+                }
+                // measurements
+                println!(
+                    "DEBUG - start: {}\nDEBUG - stop:  {}",
+                    start_time, stop_time
+                ); // DEBUG
+                println!(
+                    "DEBUG - block time needed: {} minutes",
+                    (stop_time as f64 - start_time as f64) / 60_f64
+                ); // DEBUG
+                let hashrate = {
+                    if stop_time - start_time != 0 {
+                        ((block.nonce - start_nonce) / (stop_time - start_time) as u64) as f64
+                    } else {
+                        (block.nonce - start_nonce) as f64
+                    }
+                };
+                println!("[+] MINER - hashrate: {}/sec", hashrate);
+                times.push((stop_time as f64 - start_time as f64) / 60_f64);
+                println!("DEBUG - times: {:?}", times); // DEBUG
+
+                if times.len() % 2 == 0 {
+                    let expected = unsafe { ARGS.get().unwrap().expected };
+                    println!("DEBUG - expected: {}", expected); // DEBUG
+                    let difficulty = calc_new_target(expected, &times);
+                    println!("DEBUG - new difficulty: {:?}", difficulty); // DEBUG
+                    times.clear();
+
+                    unsafe {
+                        // update difficulty
+                        match DIFFICULTY.get_mut() {
+                            Some(n) => {
+                                *n = match difficulty {
+                                    Ok(n) => n,
+                                    Err(_) => {
+                                        eprintln!("[#] MINER - calculate difficulty error");
+                                        n.to_owned()
+                                    }
+                                }
+                            }
+                            None => eprintln!("[#] MINER - update difficulty error"),
                         }
                     }
                 }
@@ -1641,9 +1724,6 @@ impl Transaction {
             Ok(n) => n,
             Err(e) => return Err(e),
         };
-
-        println!("\nDEBUG - check signature:\n{:?}\n", self); // DEBUG
-
         // feed the verifier with delicious data
         match verifier.update(self.signature_fmt().as_bytes()) {
             Ok(_) => (),

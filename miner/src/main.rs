@@ -1,11 +1,13 @@
+extern crate astro_float;
 extern crate base64;
 extern crate node;
+extern crate num_bigfloat;
 extern crate num_bigint;
 extern crate serde;
 extern crate serde_json;
+use astro_float::BigFloat;
 use base64::{engine::general_purpose::STANDARD, Engine};
-use node::utils::{difficulty_from_u8, hash_str};
-use num_bigint::BigUint;
+use node::utils::{get_difficulty_from_hex, hash_str};
 use serde::Deserialize;
 use std::{
     env,
@@ -17,12 +19,12 @@ use std::{
 #[derive(Debug, Deserialize)]
 struct Receiver {
     hash_data: String,
-    difficulty: u8,
+    difficulty: BigFloat,
     start: u64,
 }
 
-/// Mine the given block.
-fn mine(target_val: BigUint, hash_data: &str, mut start: u64) -> u64 {
+/// Mine a block and return the nonce.
+fn mine(target_val: BigFloat, hash_data: &str, mut start: u64) -> u64 {
     let check_skip = thread::spawn(|| match stdin().read_line(&mut String::new()) {
         Ok(_) => (),
         Err(e) => eprintln!(
@@ -38,15 +40,10 @@ fn mine(target_val: BigUint, hash_data: &str, mut start: u64) -> u64 {
         }
         // calculate hash and get value
         let hash = hash_str(format!("{}${}", hash_data, start).as_bytes());
-        let val = match BigUint::parse_bytes(hash.as_bytes(), 16) {
-            Some(n) => n,
-            None => {
-                let _ = stderr().write_all(b"[#] MINERBIN - parse hash to value error");
-                exit(1);
-            }
-        };
+        let val = get_difficulty_from_hex(&hash, 2, astro_float::RoundingMode::Up);
+
         // check value
-        if val <= target_val {
+        if val < target_val {
             break;
         }
         // check if nonce exeeds data type
@@ -73,11 +70,8 @@ fn main() {
         }
     };
     // hash block
-    let nonce = mine(
-        difficulty_from_u8(json.difficulty),
-        &json.hash_data,
-        json.start,
-    );
+    let nonce = mine(json.difficulty, &json.hash_data, json.start);
+
     // serialize output
     match stdout().write_all(&nonce.to_be_bytes()) {
         Ok(_) => (),

@@ -1,14 +1,15 @@
+extern crate astro_float;
 extern crate node;
 extern crate num_bigint;
 extern crate rand;
 extern crate serde_json;
+use astro_float::RoundingMode;
 use node::{
     blockchain::*,
     comm::*,
-    share::{self, COINBASE, FEE},
+    share::{self, COINBASE, DIFFICULTY, FEE},
     utils::*,
 };
-use num_bigint::BigUint;
 use rand::{seq::SliceRandom, thread_rng};
 use serde_json::json;
 use std::{
@@ -27,13 +28,24 @@ fn main() {
     let addr = share::ADDR.get().unwrap().to_string();
     if !args.genisis && args.sync {
         // synchronize args
-        match sync_args(&args.entry) {
+        match sync_args(&args.node) {
             Ok(n) => match n {
                 SyncState::Ready => (),
                 _ => panic!("[#] ARGS:SYNC - synchronization failed: {:?}", n),
             },
             Err(e) => {
                 eprintln!("[#] ARGS:SYNC - synchronization error: {}", e);
+                exit(1);
+            }
+        }
+        // synchronize difficulty
+        match sync_difficulty(&args.node) {
+            Ok(n) => match n {
+                SyncState::Ready => (),
+                _ => panic!("[#] DIFFICULTY:SYNC - synchronization failed: {:?}", n),
+            },
+            Err(e) => {
+                eprintln!("[#] DIFFICULTY:SYNC - synchronization error: {}", e);
                 exit(1);
             }
         }
@@ -71,14 +83,13 @@ fn main() {
     };
     let blockchain = Arc::new(Mutex::new(blockchain));
     let last_check = Arc::new(Mutex::new(0_u64));
-    let difficulty = Arc::new(Mutex::new(args.difficulty));
     let peers = Arc::new(Mutex::new(Vec::<String>::new()));
     let transactionpool = Arc::new(Mutex::new(TransactionPool::new(args.tx_per_block)));
 
     // synchronize everything
-    if args.sync && check_ip(&args.entry) {
+    if args.sync && check_ip(&args.node) {
         // synchronize peers
-        match sync_peers(&args.entry, &addr, &peers) {
+        match sync_peers(&args.node, &peers) {
             Ok(n) => match n {
                 SyncState::Ready => (),
                 _ => panic!("[#] PEERS:SYNC - synchronization failed: {:?}", n),
@@ -97,7 +108,7 @@ fn main() {
         // choose peer
         let peer = match peers.choose(&mut thread_rng()) {
             Some(n) => n,
-            None => &args.entry,
+            None => &args.node,
         };
         // synchronize blockchain if needed
         if state == SyncState::Needed {
@@ -129,41 +140,30 @@ fn main() {
     // construct MineController and start mining
     let mine_controller = Arc::new(MineController::new(
         &args.wallet,
-        &args.entry,
+        &args.node,
         &blockchain,
         &transactionpool,
         &peers,
-        &difficulty,
     ));
-    // start mining
-    mine_controller.run(args.genisis, args.sync);
-
     {
-        // DEBUG
-        println!(
-            "DEBUG - TransactionPool:\n{}",
-            transactionpool.lock().unwrap()
-        );
-    }
-
-    // log stuff
-    {
+        // log stuff
         println!("[+] SETUP - listening on: {}", addr);
         println!(
             "[+] SETUP - genisis hash: {}",
             blockchain.lock().unwrap().get(0).unwrap().unwrap().hash
         );
-        println!("[+] MINER - target value: {:?}", {
-            difficulty_from_u8(*difficulty.lock().unwrap())
+        println!("[+] MINER - target value: {}", {
+            unsafe { DIFFICULTY.get().unwrap() }
         });
     }
+    // start mining
+    mine_controller.run(args.genisis, args.sync);
 
     // create listener
     let listener: TcpListener = TcpListener::bind(&addr).unwrap();
     for stream in listener.incoming() {
         // clone variables instances
         let addr = addr.clone();
-        let difficulty = Arc::clone(&difficulty);
         let peers = Arc::clone(&peers);
         let transactionpool = Arc::clone(&transactionpool);
         let blockchain = Arc::clone(&blockchain);
@@ -320,7 +320,7 @@ fn main() {
                                     // choose peer
                                     let peer = match peers.choose(&mut thread_rng()) {
                                         Some(n) => n,
-                                        None => &args.entry,
+                                        None => &args.node,
                                     };
                                     // sync blockchain
                                     match chain.sync(peer, idx) {
@@ -461,6 +461,10 @@ fn main() {
 
                 Dtype::GetCoinbaseAddress => respond(&stream, COINBASE.get().unwrap()),
 
+                Dtype::GetDifficulty => {
+                    respond(&stream, unsafe { DIFFICULTY.get().unwrap().to_string() })
+                }
+
                 Dtype::GetFee => respond(&stream, FEE.get().unwrap()),
 
                 Dtype::GetPoolHash => match merkle_hash(
@@ -544,17 +548,10 @@ fn main() {
                         );
                     }
                     // parse hash difficulty
-                    let val = match BigUint::parse_bytes(block.hash.as_bytes(), 16) {
-                        Some(n) => n,
-                        None => {
-                            respond(&stream, PostBlockResponse::ParsingHashValError);
-                            eprintln!("[#] DTYPE:PostBlock - parse hash value error");
-                            return;
-                        }
-                    };
+                    let val = get_difficulty_from_hex(&block.hash, 0, RoundingMode::Up);
                     {
                         // check hash difficulty
-                        if val > difficulty_from_u8(*difficulty.lock().unwrap()) {
+                        if val > unsafe { DIFFICULTY.get().unwrap().clone() } {
                             respond(&stream, PostBlockResponse::MismatchHashDifficulty);
                             eprintln!("[#] DTYPE:PostBlock - invalid hash difficulty");
                             return;
@@ -602,6 +599,8 @@ fn main() {
 }
 
 // > TODO: make difficulty automatically adjusted
+//          - sync difficulty
+//          - to determine the difficulty: measure the time of the block
 // TODO: partial transactions request (balance) - see client
 // TODO: no transactions of amount 0 or same src and dst
 
@@ -612,3 +611,6 @@ fn main() {
 // TODO: remove debug print statements
 // TODO: GitHub licency
 // TODO: block from slice?
+//
+// Notes:
+//  difficulty of 15 - ~2:13 minutes

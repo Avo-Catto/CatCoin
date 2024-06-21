@@ -4,11 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+astro-float = "0.9.4"
 base64 = "0.22.0"
 bs58 = "0.5.1"
 chrono = "0.4.34"
 clap = { version = "4.5.1", features = ["derive"] }
 md5 = "0.7.0"
+num-bigfloat = "1.7.1"
 num-bigint = "0.4.5"
 openssl = "0.10.64"
 rand = "0.8.5"

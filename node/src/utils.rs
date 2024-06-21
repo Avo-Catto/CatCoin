@@ -1,10 +1,11 @@
 use crate::{
     blockchain::Transaction,
     comm::*,
-    share::{ADDR, ARGS, COINBASE, FEE},
+    share::{ADDR, ARGS, COINBASE, DIFFICULTY, FEE},
 };
+use astro_float::{BigFloat, Consts, Radix, RoundingMode};
 use chrono::Utc;
-use num_bigint::BigUint;
+use core::panic;
 use regex::Regex;
 use serde::Deserialize;
 use sha2::{Digest, Sha224, Sha256, Sha512};
@@ -13,11 +14,12 @@ use std::{
     error::Error,
     process::{Command, Stdio},
     sync::{Arc, Mutex},
+    usize,
 };
 
 #[derive(Deserialize)]
 struct ArgsReceiver {
-    difficulty: u8,
+    expected: u64,
     tx_per_block: u16,
     reward: f64,
     halving: u64,
@@ -146,6 +148,22 @@ pub fn calc_fee(val: f64) -> f64 {
     val * (fee / 100.0)
 }
 
+/// Calculate the new difficulty target.
+pub fn calc_new_target(expected: u64, measured: &[f64]) -> Result<BigFloat, ()> {
+    // sum all elements of measured time
+    let mut sum: f64 = measured.iter().sum::<f64>(); // * 60
+    if sum <= 0.0 {
+        sum = 1.0;
+    }
+    // calculate multiplicator
+    let multi = (sum * 60_f64) / (expected as usize * measured.len()) as f64;
+
+    // determine new difficulty target
+    let difficulty = unsafe { DIFFICULTY.get().unwrap() };
+    let res = difficulty.mul(&BigFloat::from_f64(multi, 2), 2, RoundingMode::Down);
+    Ok(res)
+}
+
 /// Validate an address.
 pub fn check_addr_by_key(addr: &str, pub_key: &Vec<u8>) -> Result<bool, Box<dyn Error>> {
     // check length
@@ -251,14 +269,14 @@ where
     collection
 }
 
-/// Returns the target value.
-pub fn difficulty_from_u8(difficulty: u8) -> BigUint {
+/// Returns a target value based on the amount of zeros.
+pub fn difficulty_from_u8(difficulty: u8) -> BigFloat {
     // get hash difficulty
     let pat = "F".repeat(usize::from(difficulty));
     let to = "0".repeat(usize::from(difficulty));
     let hex_str = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
         .replacen(&pat, &to, 1);
-    BigUint::parse_bytes(hex_str.as_bytes(), 16).unwrap()
+    get_difficulty_from_hex(&hex_str, 2, RoundingMode::Down)
 }
 
 /// Generate an address.
@@ -292,6 +310,15 @@ pub fn get_blockreward(idx: u64) -> f64 {
     args.reward * 0.5_f64.powf((idx / args.halving) as f64)
 }
 
+/// Get the difficulty value of a string.
+pub fn get_difficulty_from_hex(data: &str, p: usize, rm: RoundingMode) -> BigFloat {
+    if p == 0 {
+        panic!("invalid precision");
+    }
+    let mut cc = Consts::new().expect("constant cache panic");
+    BigFloat::parse(data, Radix::Hex, p, rm, &mut cc)
+}
+
 /// Calculate the sum of all fees of the given transactions.
 pub fn get_fees(txs: &Vec<Transaction>) -> f64 {
     let mut out = 0_f64;
@@ -319,10 +346,10 @@ where
 
 /// Get the timestamp by human notation.
 /// Example:
-/// 2m:3h:5d:2w - valid after 2 minutes, 3 hours, 5 days, 2 weeks
+/// 3s:2m:3h:5d:2w - valid after 3 seconds, 2 minutes, 3 hours, 5 days, 2 weeks
 pub fn get_timestamp(syntax: &str) -> Result<i64, Box<dyn Error>> {
     let syntax = syntax.to_string();
-    if syntax.len() < 3 {
+    if syntax.len() < 2 {
         return Ok(0);
     }
     let mut out = 0_i64;
@@ -333,6 +360,7 @@ pub fn get_timestamp(syntax: &str) -> Result<i64, Box<dyn Error>> {
             Err(e) => return Err(Box::new(e)),
         };
         match t {
+            "s" => out += multi,
             "m" => out += 60 * multi,
             "h" => out += 60 * 60 * multi,
             "d" => out += 60 * 60 * 24 * multi,
@@ -386,19 +414,22 @@ pub fn merkle_hash(data: Vec<String>) -> Option<String> {
     }
 }
 
+pub fn multiply_u8_array(a: &[u8], b: &[u8]) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    for i in 0..a.len() {
+        out.extend_from_slice(&((a[i] * b[i]) as u16).to_be_bytes());
+    }
+    out
+}
+
 /// Convert an u8 array to an u64 vector.
-// TODO: u64::from_be_bytes(&buf)
 pub fn u8_to_u64_vec(val: &[u8]) -> Result<Vec<u64>, Box<dyn Error>> {
     if val.len() % 8 != 0 {
         return Err(format!("invalid chunk size: {}", val.len()).into());
     }
     let mut out = Vec::new();
     for i in val.chunks(8) {
-        let mut temp = i[0] as u64;
-        for x in 1..i.len() {
-            temp = temp << 8 | i[x] as u64
-        }
-        out.push(temp);
+        out.push(u64::from_be_bytes(i.try_into()?));
     }
     Ok(out)
 }
@@ -452,7 +483,7 @@ pub fn sync_args(addr: &str) -> Result<SyncState, SyncError> {
         // update args
         match ARGS.get_mut() {
             Some(args) => {
-                args.difficulty = json.difficulty;
+                args.expected = json.expected;
                 args.tx_per_block = json.tx_per_block;
                 args.reward = json.reward;
                 args.halving = json.halving;
@@ -474,7 +505,7 @@ pub fn sync_coinbase(addr: &str) -> Result<SyncState, SyncError> {
     let req = Request {
         dtype: Dtype::GetCoinbaseAddress,
         data: "",
-        addr: addr.to_string(),
+        addr: ADDR.get().unwrap().to_owned(),
     };
     // send request
     let stream = match request(addr, &req) {
@@ -497,20 +528,56 @@ pub fn sync_coinbase(addr: &str) -> Result<SyncState, SyncError> {
     Ok(SyncState::Ready)
 }
 
+/// Synchronize the difficulty.
+/// Returns `SyncState::Ready` if the synchronizationg succeeds.
+pub fn sync_difficulty(addr: &str) -> Result<SyncState, SyncError> {
+    println!("[+] DIFFICULTY:SYNC - updating difficulty");
+
+    // craft request
+    let req = Request {
+        dtype: Dtype::GetDifficulty,
+        data: "",
+        addr: ADDR.get().unwrap().to_owned(),
+    };
+    // send request
+    let stream = match request(addr, &req) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("[#] DIFFICULTY:SYNC - request request error: {}", e);
+            return Err(SyncError::Request);
+        }
+    };
+    // receive list of peers
+    let response: Response<BigFloat> = match receive(stream) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("[#] DIFFICULTY:SYNC - receive difficulty error: {}", e);
+            return Err(SyncError::Receive);
+        }
+    };
+    // update difficulty
+    unsafe {
+        match DIFFICULTY.get_mut() {
+            Some(n) => *n = response.res,
+            None => {
+                eprintln!("[#] DIFFICULTY:SYNC - get instance of difficulty error");
+                return Err(SyncError::InvalidValue);
+            }
+        }
+    };
+    Ok(SyncState::Ready)
+}
+
 /// Synchronize the list of peers by requesting peers and broadcasting it's own address.
 /// Returns `SyncState::Ready` if the synchronization succeeds.
-pub fn sync_peers(
-    addr: &str,
-    addr_self: &str,
-    peers: &Arc<Mutex<Vec<String>>>,
-) -> Result<SyncState, SyncError> {
+pub fn sync_peers(addr: &str, peers: &Arc<Mutex<Vec<String>>>) -> Result<SyncState, SyncError> {
     println!("[+] PEERS:SYNC - updating list of peers");
 
     // craft request
     let req = Request {
         dtype: Dtype::GetPeers,
         data: "",
-        addr: addr_self.to_string(),
+        addr: ADDR.get().unwrap().to_owned(),
     };
     // send request
     let stream = match request(addr, &req) {
@@ -547,7 +614,7 @@ pub fn sync_peers(
 
     // broadcast address to peers
     println!("[+] PEERS:SYNC - broadcasting address");
-    let (_, rm) = broadcast::<AddPeerResponse>(&peers_rcved, Dtype::AddPeer, &addr_self);
+    let (_, rm) = broadcast::<AddPeerResponse>(&peers_rcved, Dtype::AddPeer, ADDR.get().unwrap());
 
     // remove unreachable peers & update peers
     let mut peers = peers.lock().unwrap();

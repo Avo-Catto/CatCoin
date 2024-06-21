@@ -9,6 +9,8 @@ num-bigint = "0.4.5"
 serde = { version = "1.0.197", features = ["derive"] }
 serde_json = "1.0.114"
 node = { path = "../node" }
+num-bigfloat = "1.7.1"
+astro-float = "0.9.4"
 
 [dependencies.uuid]
 version = "1.7.0"

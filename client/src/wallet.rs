@@ -13,10 +13,9 @@ use self::aes_gcm::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
     Aes256Gcm, Key, Nonce,
 };
-use self::chrono::Utc;
 use self::node::{
     comm::{receive, request, Dtype, Request},
-    utils::TVE,
+    utils::{get_timestamp, timestamp_now, TVE},
 };
 use self::openssl::{
     error::ErrorStack,
@@ -30,8 +29,11 @@ use self::rand::{thread_rng, Rng};
 use self::serde::{Deserialize, Serialize};
 use self::serde_json::json;
 use self::sha2::{Digest, Sha224, Sha256, Sha512};
+use crate::AddTransactionResponse;
 use crate::{output, ADDRESS, FEE, KEY_PATH, WALLET_PATH};
+use node::utils::multiply_u8_array;
 use std::{
+    convert::TryInto,
     error::Error,
     fs::{self, File},
     io::{self, Read, Write},
@@ -95,9 +97,6 @@ impl Transaction {
             Ok(n) => n,
             Err(e) => return Err(e),
         };
-
-        println!("\nDEBUG - check signature:\n{:?}\n", self); // DEBUG
-
         // feed the verifier with delicious data
         match verifier.update(self.signature_fmt().as_bytes()) {
             Ok(_) => (),
@@ -195,9 +194,6 @@ impl Transaction {
                 return Err(Box::new(e));
             }
         };
-
-        println!("\nDEBUG - what's going to be signed:\n{:?}\n", self); // DEBUG
-
         match signer.update(self.signature_fmt().as_bytes()) {
             Ok(_) => (),
             Err(e) => {
@@ -709,32 +705,6 @@ pub fn get_balance(addr: &str) -> Result<f64, Box<dyn Error>> {
     Ok(value)
 }
 
-/// Get the timestamp by human notation.
-/// Example:
-/// 2m:3h:5d:2w - valid after 2 minutes, 3 hours, 5 days, 2 weeks
-pub fn get_timestamp(syntax: &str) -> Result<i64, Box<dyn Error>> {
-    let syntax = syntax.to_string();
-    if syntax.len() < 3 {
-        return Ok(0);
-    }
-    let mut out = 0_i64;
-    for i in syntax.split(':') {
-        let (multi, t) = i.split_at(i.len() - 1);
-        let multi: i64 = match multi.parse() {
-            Ok(n) => n,
-            Err(e) => return Err(Box::new(e)),
-        };
-        match t {
-            "m" => out += 60 * multi,
-            "h" => out += 60 * 60 * multi,
-            "d" => out += 60 * 60 * 24 * multi,
-            "w" => out += 60 * 60 * 24 * 7 * multi,
-            _ => (),
-        }
-    }
-    Ok(out)
-}
-
 pub fn get_transactions(addr: &str) -> Result<Vec<Transaction>, Box<dyn Error>> {
     // craft request
     let req = Request {
@@ -827,37 +797,60 @@ pub fn request_fee() -> Result<Option<u8>, Box<dyn Error>> {
     }
 }
 
-/// Returns the current timestamp.
-pub fn timestamp_now() -> i64 {
-    Utc::now().timestamp()
+pub fn test(wallet: &Wallet) {
+    let src = gen_address(&wallet.pub_key, 1, &wallet.addr_salts[1]);
+    let dst = gen_address(&wallet.pub_key, 2, &wallet.addr_salts[2]);
+    for i in 0..30 {
+        // create transaction
+        let mut transaction = match Transaction::new(&src, &dst, 0.0, "") {
+            Ok(n) => n,
+            Err(e) => {
+                output(&format!("transaction error: {}", e));
+                continue;
+            }
+        };
+        transaction.timestamp += i;
+        // sign transaction
+        match transaction.sign(&wallet) {
+            Ok(_) => (),
+            Err(e) => {
+                output(&format!("sign transaction error: {}", e));
+                continue;
+            }
+        };
+        // validate transaction
+        match transaction.validate() {
+            Ok(_) => (),
+            Err(e) => {
+                output(&format!("transaction validation error: {:?}", e));
+                continue;
+            }
+        }
+
+        // craft request
+        let req = Request {
+            dtype: Dtype::AddTransaction,
+            data: transaction.as_json().to_string(),
+            addr: String::new(),
+        };
+        // send transaction into network
+        let stream = match request(unsafe { ADDRESS.get().unwrap() }, &req) {
+            Ok(n) => n,
+            Err(e) => {
+                output(&format!("transaction aborted due to error: {}", e));
+                continue;
+            }
+        };
+        // receive response
+        match receive::<AddTransactionResponse>(stream) {
+            Ok(n) => output(&format!("transaction released: {:?}", n.res)),
+            Err(e) => output(&format!("transaction aborted due to error: {}", e)),
+        };
+    }
 }
 
-pub fn test() {
-    for i in 0..4 {
-        println!("{}", i);
-    }
-
-    // craft request
-    let req = Request {
-        dtype: Dtype::GetBlock,
-        data: "3",
-        addr: String::new(),
-    };
-    // send request
-    let stream = match request(unsafe { ADDRESS.get().unwrap() }, &req) {
-        Ok(n) => n,
-        Err(e) => {
-            output(&format!("TEST - request error: {}", e));
-            return;
-        }
-    };
-    // receive response
-    let res = match receive::<String>(stream) {
-        Ok(n) => n,
-        Err(e) => {
-            output(&format!("TEST - receive error: {}", e));
-            return;
-        }
-    };
-    print!("DEBUG - OUTPUT:\n{:#?}\n", res);
+pub fn test1() {
+    let a = 5_f32.to_be_bytes();
+    let c = f32::from_be_bytes(multiply_u8_array(&a, &a).try_into().unwrap());
+    println!("result: {}", c);
 }
