@@ -1037,7 +1037,8 @@ pub struct MineController {
     run_send: Arc<Mutex<mpsc::Sender<bool>>>,
     run_recv: Arc<Mutex<mpsc::Receiver<bool>>>,
     pub current_block: Arc<Mutex<Block>>,
-    sleep: Arc<Duration>, // TODO: make it configurable
+    pub measured_times: Arc<Mutex<Vec<f64>>>,
+    sleep: Arc<Duration>,
 }
 
 impl MineController {
@@ -1048,6 +1049,7 @@ impl MineController {
         blockchain: &Arc<Mutex<BlockChain>>,
         transactionpool: &Arc<Mutex<TransactionPool>>,
         peers: &Arc<Mutex<Vec<String>>>,
+        measured_times: &Arc<Mutex<Vec<f64>>>,
     ) -> Self {
         let (send, recv) = mpsc::channel();
         MineController {
@@ -1060,6 +1062,11 @@ impl MineController {
             run_recv: Arc::new(Mutex::new(recv)),
             current_block: Arc::new(Mutex::new(Block::default())),
             sleep: Arc::new(Duration::from_millis(500)),
+            measured_times: {
+                let mut a = Arc::new(Mutex::new(Vec::with_capacity(2)));
+                Arc::clone_from(&mut a, measured_times);
+                a
+            },
         }
     }
 
@@ -1206,7 +1213,6 @@ impl MineController {
         }
         let self_arc: Arc<MineController> = Arc::new(self.clone());
         thread::spawn(move || {
-            let mut times: Vec<f64> = Vec::with_capacity(2);
             loop {
                 // measurements
                 let start_nonce: u64 = thread_rng().gen(); // calculate hashrate based on incrementation
@@ -1287,6 +1293,7 @@ impl MineController {
                     if !check_skip.is_finished() {
                         self_arc.send_stop();
                     } else {
+                        let mut times = self_arc.measured_times.lock().unwrap();
                         times.push(timestamp_now() as f64 - start_time as f64);
                         println!("DEBUG - times: {:?}", times); // DEBUG
 
@@ -1376,6 +1383,8 @@ impl MineController {
                         (block.nonce - start_nonce) as f64
                     }
                 };
+                let mut times = self_arc.measured_times.lock().unwrap();
+
                 println!("[+] MINER - hashrate: {}/sec", hashrate);
                 times.push((stop_time as f64 - start_time as f64) / 60_f64);
                 println!("DEBUG - times: {:?}", times); // DEBUG

@@ -26,6 +26,7 @@ fn main() {
     share::init();
     let args = unsafe { share::ARGS.get().unwrap().to_owned() };
     let addr = share::ADDR.get().unwrap().to_string();
+    let mut measured_times: Vec<f64> = Vec::with_capacity(2);
     if !args.genisis && args.sync {
         // synchronize args
         match sync_args(&args.node) {
@@ -39,7 +40,7 @@ fn main() {
             }
         }
         // synchronize difficulty
-        match sync_difficulty(&args.node) {
+        match sync_difficulty(&args.node, *measured_times) {
             Ok(n) => match n {
                 SyncState::Ready => (),
                 _ => panic!("[#] DIFFICULTY:SYNC - synchronization failed: {:?}", n),
@@ -85,6 +86,7 @@ fn main() {
     let last_check = Arc::new(Mutex::new(0_u64));
     let peers = Arc::new(Mutex::new(Vec::<String>::new()));
     let transactionpool = Arc::new(Mutex::new(TransactionPool::new(args.tx_per_block)));
+    let measured_times = Arc::new(Mutex::new(measured_times));
 
     // synchronize everything
     if args.sync && check_ip(&args.node) {
@@ -144,14 +146,18 @@ fn main() {
         &blockchain,
         &transactionpool,
         &peers,
+        &measured_times,
     ));
     {
         // log stuff
         println!("[+] SETUP - listening on: {}", addr);
-        println!(
-            "[+] SETUP - genisis hash: {}",
-            blockchain.lock().unwrap().get(0).unwrap().unwrap().hash
-        );
+        match blockchain.lock().unwrap().get(0) {
+            Ok(n) => match n {
+                Some(n) => println!("[+] SETUP - genisis hash: {}", n.hash),
+                None => (),
+            },
+            Err(e) => eprintln!("[#] SETUP - get genisis error: {}", e),
+        }
         println!("[+] MINER - target value: {}", {
             unsafe { DIFFICULTY.get().unwrap() }
         });
@@ -169,6 +175,7 @@ fn main() {
         let blockchain = Arc::clone(&blockchain);
         let mine_controller = Arc::clone(&mine_controller);
         let last_check = Arc::clone(&last_check);
+        let times = Arc::clone(&measured_times);
 
         // spawn thread and handle connection
         let _ = thread::spawn(move || {
@@ -462,7 +469,13 @@ fn main() {
                 Dtype::GetCoinbaseAddress => respond(&stream, COINBASE.get().unwrap()),
 
                 Dtype::GetDifficulty => {
-                    respond(&stream, unsafe { DIFFICULTY.get().unwrap().to_string() })
+                    let data = json!({
+                        "difficulty": unsafe {
+                            DIFFICULTY.get().unwrap()
+                        },
+                        "times": *measured_times.lock().unwrap()
+                    });
+                    respond(&stream, unsafe { data.to_string() })
                 }
 
                 Dtype::GetFee => respond(&stream, FEE.get().unwrap()),
@@ -599,6 +612,7 @@ fn main() {
 }
 
 // > TODO: make difficulty automatically adjusted
+//          - clean up time measurement code
 //          - sync difficulty
 //          - to determine the difficulty: measure the time of the block
 // TODO: partial transactions request (balance) - see client
@@ -611,6 +625,3 @@ fn main() {
 // TODO: remove debug print statements
 // TODO: GitHub licency
 // TODO: block from slice?
-//
-// Notes:
-//  difficulty of 15 - ~2:13 minutes

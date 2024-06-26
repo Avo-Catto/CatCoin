@@ -528,9 +528,16 @@ pub fn sync_coinbase(addr: &str) -> Result<SyncState, SyncError> {
     Ok(SyncState::Ready)
 }
 
+// TODO: move up
+#[derive(Deserialize)]
+struct DifficultyReceiver {
+    difficulty: BigFloat,
+    times: Vec<f64>,
+}
+
 /// Synchronize the difficulty.
 /// Returns `SyncState::Ready` if the synchronizationg succeeds.
-pub fn sync_difficulty(addr: &str) -> Result<SyncState, SyncError> {
+pub fn sync_difficulty(addr: &str, measured_times: *mut Vec<f64>) -> Result<SyncState, SyncError> {
     println!("[+] DIFFICULTY:SYNC - updating difficulty");
 
     // craft request
@@ -548,23 +555,26 @@ pub fn sync_difficulty(addr: &str) -> Result<SyncState, SyncError> {
         }
     };
     // receive list of peers
-    let response: Response<BigFloat> = match receive(stream) {
+    let response: Response<String> = match receive(stream) {
         Ok(n) => n,
         Err(e) => {
             eprintln!("[#] DIFFICULTY:SYNC - receive difficulty error: {}", e);
             return Err(SyncError::Receive);
         }
     };
+    let data: DifficultyReceiver = serde_json::from_str(&response.res).unwrap();
+
     // update difficulty
     unsafe {
         match DIFFICULTY.get_mut() {
-            Some(n) => *n = response.res,
+            Some(n) => *n = data.difficulty,
             None => {
                 eprintln!("[#] DIFFICULTY:SYNC - get instance of difficulty error");
                 return Err(SyncError::InvalidValue);
             }
         }
     };
+    measured_times = data.times;
     Ok(SyncState::Ready)
 }
 
