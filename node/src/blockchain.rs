@@ -652,7 +652,7 @@ impl BlockChain {
             Ok(_) => (),
             Err(e) => return Err(e),
         }
-        println!("[#] BLOCKCHAIN - clear databases successful");
+        println!("[+] BLOCKCHAIN - clear databases successful");
         Ok(())
     }
 
@@ -684,7 +684,6 @@ impl BlockChain {
         };
         let mut genisis_block = Block::new(0, vec![], String::new());
         genisis_block.calc_hash(0); // calc hash of block
-        println!("DEBUG - genisis block:\n{}", genisis_block);
         self.add_block(&mut genisis_block)
     }
 
@@ -995,7 +994,7 @@ impl BlockChain {
                 }
                 Err(e) => {
                     eprintln!("[#] BLOCKCHAIN:SYNC - adding block error: {}", e);
-                    exit(1); // DEBUG
+                    exit(1);
                 }
             }
         }

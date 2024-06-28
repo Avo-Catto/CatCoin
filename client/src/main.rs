@@ -2,18 +2,16 @@ mod console;
 mod wallet;
 extern crate node;
 extern crate uuid;
-use std::{sync::OnceLock, usize};
-
 use console::*;
 use node::comm::{receive, request, AddTransactionResponse, Dtype, Request};
-use wallet::{
-    check_wallet_exists, gen_address, gen_salt, get_balance, request_fee, test, test1, Wallet,
-};
+use std::{process::exit, sync::OnceLock, usize};
+use wallet::{check_wallet_exists, gen_address, gen_salt, get_balance, request_fee, Wallet};
 
+// constants & statics
 const USER_PATH: &'static str = "client/data/passwd";
 const KEY_PATH: &'static str = "client/data/keys";
 const WALLET_PATH: &'static str = "client/data/wallets";
-static mut ADDRESS: OnceLock<&str> = OnceLock::new();
+static mut ADDRESS: OnceLock<String> = OnceLock::new();
 static mut FEE: OnceLock<u8> = OnceLock::new();
 
 fn help() {
@@ -30,7 +28,7 @@ set -> node",
 
 fn main() {
     unsafe {
-        ADDRESS.get_or_init(|| "127.0.0.1:8000");
+        ADDRESS.get_or_init(|| String::from("127.0.0.1:8000"));
         FEE.get_or_init(|| match request_fee() {
             Ok(n) => match n {
                 Some(m) => m,
@@ -57,8 +55,10 @@ fn main() {
             continue;
         }
         // process input
-        // TODO: exit
         match cmd[0].as_str() {
+            "exit" => exit(1),
+            "help" => help(),
+            "whoami" => output(&user.username),
             "get" => {
                 if cmd.len() < 2 {
                     continue;
@@ -98,14 +98,17 @@ fn main() {
                                         }
                                     },
                                 );
-                                let val = match get_balance(&addr) {
+                                let (val, pending) = match get_balance(&addr) {
                                     Ok(n) => n,
                                     Err(e) => {
                                         output(&format!("IDX: {} > {} - error: {}", i, addr, e));
                                         continue;
                                     }
                                 };
-                                output(&format!("IDX: {} > {}\nVAL: {}\n", i, addr, val));
+                                output(&format!(
+                                    "IDX: {} > {}\nVALUE: {}\nPENDING: {}\n",
+                                    i, addr, val, pending
+                                ));
                             }
                         } else {
                             // generate address
@@ -120,20 +123,22 @@ fn main() {
                                     }
                                 },
                             );
-                            let val = match get_balance(&addr) {
+                            let (val, pending) = match get_balance(&addr) {
                                 Ok(n) => n,
                                 Err(e) => {
                                     output(&format!("IDX: {} > {} - error: {}", idx, addr, e));
                                     continue;
                                 }
                             };
-                            output(&format!("IDX: {} > {}\nVAL: {}\n", idx, addr, val));
+                            output(&format!(
+                                "IDX: {} > {}\nVALUE: {}\nPENDING: {}",
+                                idx, addr, val, pending
+                            ));
                         }
                     }
                     _ => (),
                 }
             }
-            "help" => help(),
             "new" => {
                 if cmd.len() < 2 {
                     continue;
@@ -145,8 +150,6 @@ fn main() {
                             Err(e) => output(&format!("create user error: {}", e)),
                         };
                     }
-                    // TODO: could it be possible that the wallet isn't correctly overwritten which
-                    //       lead to the decryption error?
                     "wallet" => {
                         // check if logged in
                         if user.username == "anonymous" {
@@ -367,23 +370,17 @@ fn main() {
                     continue;
                 }
                 match cmd[1].as_str() {
-                    "node" => output("set the ip address of the node in future"), // TODO
+                    "node" => unsafe {
+                        let address = match prompt("New Address of Node: ").get(0) {
+                            Some(n) => n.to_owned(),
+                            None => continue,
+                        };
+                        *ADDRESS.get_mut().unwrap() = address;
+                    },
                     _ => (),
                 }
             }
-            "whoami" => output(&user.username),
-            "test" => test(&user.wallet),
-            "test1" => test1(),
             _ => continue,
         }
     }
 }
-
-// MINDSET: you write quality code, not quick and bad code!
-// TODO: test transactions per block limitation
-// TODO: implement get balance since index
-// TODO: one error logging
-// TODO: differentiate timestamp so (coins pending and current)
-// TODO: save index of block and balance until where balance was received, so I don't have to
-// request the entire chain again (get balance partially) - would include sending the index
-// TODO: improve user experience

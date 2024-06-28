@@ -29,11 +29,8 @@ use self::rand::{thread_rng, Rng};
 use self::serde::{Deserialize, Serialize};
 use self::serde_json::json;
 use self::sha2::{Digest, Sha224, Sha256, Sha512};
-use crate::AddTransactionResponse;
 use crate::{output, ADDRESS, FEE, KEY_PATH, WALLET_PATH};
-use node::utils::multiply_u8_array;
 use std::{
-    convert::TryInto,
     error::Error,
     fs::{self, File},
     io::{self, Read, Write},
@@ -72,6 +69,7 @@ impl Transaction {
         })
     }
 
+    /// Json representation of the transaction.
     pub fn as_json(&self) -> serde_json::Value {
         json!({
             "src": self.src,
@@ -101,7 +99,7 @@ impl Transaction {
         match verifier.update(self.signature_fmt().as_bytes()) {
             Ok(_) => (),
             Err(e) => {
-                eprintln!("[#] TRANSACTION:verify - update verifier error: {}", e);
+                eprintln!(" [#] TRANSACTION:verify - update verifier error: {}", e);
                 return Err(e);
             }
         };
@@ -183,28 +181,28 @@ impl Transaction {
         ) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("[#] TRANSACTION:sign - load private key error: {}", e);
+                eprintln!(" [#] TRANSACTION:sign - load private key error: {}", e);
                 return Err(Box::new(e));
             }
         };
         let mut signer = match Signer::new(MessageDigest::sha1(), &priv_key) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("[#] TRANSACTION:sign - construct signer error: {}", e);
+                eprintln!(" [#] TRANSACTION:sign - construct signer error: {}", e);
                 return Err(Box::new(e));
             }
         };
         match signer.update(self.signature_fmt().as_bytes()) {
             Ok(_) => (),
             Err(e) => {
-                eprintln!("[#] TRANSACTION:sign - update signer error: {}", e);
+                eprintln!(" [#] TRANSACTION:sign - update signer error: {}", e);
                 return Err(Box::new(e));
             }
         };
         self.signature = match signer.sign_to_vec() {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("[#] TRANSACTION:sign - sign transaction error: {}", e);
+                eprintln!(" [#] TRANSACTION:sign - sign transaction error: {}", e);
                 return Err(Box::new(e));
             }
         };
@@ -238,7 +236,7 @@ impl Transaction {
         }
         // check balance
         let balance = match get_balance(&self.src) {
-            Ok(n) => n,
+            Ok(n) => n.0,
             Err(_) => return Err(TVE::BalanceError),
         };
         if balance < self.val + self.fee {
@@ -252,7 +250,7 @@ impl Transaction {
                 }
             }
             Err(e) => {
-                eprintln!("[#] TRANSACTION:validate - check signature error: {}", e);
+                eprintln!(" [#] TRANSACTION:validate - check signature error: {}", e);
                 return Err(TVE::SignatureError);
             }
         }
@@ -329,7 +327,7 @@ impl Wallet {
         let mut f = match File::open(format!("{}/pub_key_{}", KEY_PATH, uid)) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("[#] WALLET:from - read public key file: {}", e);
+                eprintln!(" [#] WALLET:from - read public key file: {}", e);
                 return Err(Box::new(e));
             }
         };
@@ -341,7 +339,7 @@ impl Wallet {
         let pub_key = match decrypt(password, &pub_key) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("[#] WALLET:from - decrypt public key error: {}", e);
+                eprintln!(" [#] WALLET:from - decrypt public key error: {}", e);
                 return Err(Box::new(io::Error::other("decryption error")));
             }
         };
@@ -349,7 +347,7 @@ impl Wallet {
         let mut f = match File::open(format!("{}/priv_key_{}", KEY_PATH, uid)) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("[#] WALLET:from - read private key file error: {}", e);
+                eprintln!(" [#] WALLET:from - read private key file error: {}", e);
                 return Err(Box::new(e));
             }
         };
@@ -361,7 +359,7 @@ impl Wallet {
         let priv_key = match decrypt(password, &priv_key) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("[#] WALLET:from - decrypt private key error: {}", e);
+                eprintln!(" [#] WALLET:from - decrypt private key error: {}", e);
                 return Err(Box::new(io::Error::other("decryption error")));
             }
         };
@@ -369,7 +367,7 @@ impl Wallet {
         let mut f = match File::open(format!("{}/{}", WALLET_PATH, uid)) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("[#] WALLET:from - read wallet file error: {}", e);
+                eprintln!(" [#] WALLET:from - read wallet file error: {}", e);
                 return Err(Box::new(e));
             }
         };
@@ -381,7 +379,7 @@ impl Wallet {
         let data = match decrypt(password, &wallet) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("[#] WALLET:from - decrypt wallet error: {}", e);
+                eprintln!(" [#] WALLET:from - decrypt wallet error: {}", e);
                 return Err(Box::new(io::Error::other("decryption error")));
             }
         };
@@ -389,7 +387,7 @@ impl Wallet {
         let json: WalletReader = match serde_json::from_str(&String::from_utf8_lossy(&data)) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("[#] WALLET:from - parse wallet to json error: {}", e);
+                eprintln!(" [#] WALLET:from - parse wallet to json error: {}", e);
                 return Err(Box::new(e));
             }
         };
@@ -406,6 +404,7 @@ impl Wallet {
         })
     }
 
+    /// Hash some stuff to get a passphrase.
     fn get_passphrase(mnemonics: &Vec<String>, salt: &String) -> String {
         let passphrase = format!("{}${}", mnemonics.concat(), salt);
         format!("{:x}", Sha256::digest(passphrase.as_bytes()))
@@ -441,7 +440,7 @@ impl Wallet {
         let data = match encrypt(password, &wallet) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("[#] WALLET:save - encrypt wallet error: {}", e);
+                eprintln!(" [#] WALLET:save - encrypt wallet error: {}", e);
                 return Err(Box::new(io::Error::other("encryption error")));
             }
         };
@@ -453,7 +452,7 @@ impl Wallet {
         {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("[#] WALLET:save - create public key file error: {}", e);
+                eprintln!(" [#] WALLET:save - create public key file error: {}", e);
                 return Err(Box::new(e));
             }
         };
@@ -461,7 +460,7 @@ impl Wallet {
         match f.write_all(&data) {
             Ok(_) => (),
             Err(e) => {
-                eprintln!("[#] WALLET:save - write credentials error: {}", e);
+                eprintln!(" [#] WALLET:save - write credentials error: {}", e);
                 return Err(Box::new(e));
             }
         }
@@ -470,7 +469,7 @@ impl Wallet {
         let pub_key_str = match String::from_utf8(self.pub_key.clone()) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("[#] WALLET:save - parse bytes to string error: {}", e);
+                eprintln!(" [#] WALLET:save - parse bytes to string error: {}", e);
                 return Err(Box::new(e));
             }
         };
@@ -478,7 +477,7 @@ impl Wallet {
         let data = match encrypt(password, &pub_key_str) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("[#] WALLET:save - encrypt public key error: {}", e);
+                eprintln!(" [#] WALLET:save - encrypt public key error: {}", e);
                 return Err(Box::new(io::Error::other("encryption error")));
             }
         };
@@ -486,7 +485,7 @@ impl Wallet {
         let mut f = match File::create(format!("{}/pub_key_{}", KEY_PATH, self.uid)) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("[#] WALLET:save - create public key file error: {}", e);
+                eprintln!(" [#] WALLET:save - create public key file error: {}", e);
                 return Err(Box::new(e));
             }
         };
@@ -494,7 +493,7 @@ impl Wallet {
         match f.write_all(&data) {
             Ok(_) => (),
             Err(e) => {
-                eprintln!("[#] WALLET:save - write public key error: {}", e);
+                eprintln!(" [#] WALLET:save - write public key error: {}", e);
                 return Err(Box::new(e));
             }
         }
@@ -503,7 +502,7 @@ impl Wallet {
         let priv_key_str = match String::from_utf8(self.priv_key.clone()) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("[#] WALLET:save - parse bytes to string error: {}", e);
+                eprintln!(" [#] WALLET:save - parse bytes to string error: {}", e);
                 return Err(Box::new(e));
             }
         };
@@ -511,7 +510,7 @@ impl Wallet {
         let data = match encrypt(password, &priv_key_str) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("[#] WALLET:save - encrypt public key error: {}", e);
+                eprintln!(" [#] WALLET:save - encrypt public key error: {}", e);
                 return Err(Box::new(io::Error::other("encryption error")));
             }
         };
@@ -519,7 +518,7 @@ impl Wallet {
         let mut f = match File::create(format!("{}/priv_key_{}", KEY_PATH, self.uid)) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("[#] WALLET:save - create private key file: {}", e);
+                eprintln!(" [#] WALLET:save - create private key file: {}", e);
                 return Err(Box::new(e));
             }
         };
@@ -527,7 +526,7 @@ impl Wallet {
         match f.write_all(&data) {
             Ok(_) => (),
             Err(e) => {
-                eprintln!("[#] WALLET:save - write private key error: {}", e);
+                eprintln!(" [#] WALLET:save - write private key error: {}", e);
                 return Err(Box::new(e));
             }
         }
@@ -577,7 +576,7 @@ pub fn check_addr_by_key(addr: &str, pub_key: &Vec<u8>) -> bool {
     // validate address
     if gen_address(pub_key, idx, &salt) != addr {
         eprintln!(
-            "not equal: {:?} - idx:{:?} - salt:{:?} - key:{:?}",
+            " [#] not equal: {:?} - idx:{:?} - salt:{:?} - key:{:?}",
             gen_address(pub_key, idx, &salt),
             idx,
             salt,
@@ -592,14 +591,13 @@ pub fn check_addr_by_key(addr: &str, pub_key: &Vec<u8>) -> bool {
 pub fn check_addr_by_sum(addr: &str) -> bool {
     // check length
     if !check_addr_len(addr) {
-        println!("address too short: {}", addr.len()); // DEBUG
         return false;
     }
     // decode address
     let decoded = match bs58::decode(addr).into_vec() {
         Ok(n) => n,
         Err(e) => {
-            eprintln!("validate address error: {}", e);
+            eprintln!(" [#] validate address error: {}", e);
             return false;
         }
     };
@@ -688,28 +686,43 @@ pub fn gen_salt(len: usize) -> String {
     out.concat()
 }
 
-// TODO: balance and future balance
-pub fn get_balance(addr: &str) -> Result<f64, Box<dyn Error>> {
+/// Get the balance of an address.
+/// Returns `(current, pending)`
+pub fn get_balance(addr: &str) -> Result<(f64, f64), Box<dyn Error>> {
+    // retrieve all transactions
     let transactions = match get_transactions(addr) {
         Ok(n) => n,
         Err(e) => return Err(e),
     };
     let mut value = 0_f64;
+    let mut pending = 0_f64;
+    let now = timestamp_now();
+
+    // iterate through transactions
     for tx in transactions {
         if tx.src == addr.to_string() {
-            value -= tx.val + tx.fee;
+            if tx.timestamp < now {
+                value -= tx.val + tx.fee;
+            } else {
+                pending -= tx.val + tx.fee;
+            }
         } else if &tx.dst == addr {
-            value += tx.val;
+            if tx.timestamp < now {
+                value += tx.val;
+            } else {
+                pending += tx.val;
+            }
         }
     }
-    Ok(value)
+    Ok((value, pending))
 }
 
+/// Get all of the corresponding transactions of an address.
 pub fn get_transactions(addr: &str) -> Result<Vec<Transaction>, Box<dyn Error>> {
     // craft request
     let req = Request {
         dtype: Dtype::GetTransactions,
-        data: json!(addr_to_pattern(addr)).to_string(),
+        data: json!({"pattern": addr_to_pattern(addr), "since": 0}).to_string(),
         addr: String::new(),
     };
     // send request
@@ -736,7 +749,7 @@ pub fn get_transactions(addr: &str) -> Result<Vec<Transaction>, Box<dyn Error>> 
             Ok(n) => n,
             Err(e) => {
                 eprintln!(
-                    "[#] TRANSACTIONPOOL:SYNC - parse transaction to json error: {}",
+                    " [#] TRANSACTIONPOOL:SYNC - parse transaction to json error: {}",
                     e
                 );
                 return Err(Box::new(e));
@@ -747,7 +760,7 @@ pub fn get_transactions(addr: &str) -> Result<Vec<Transaction>, Box<dyn Error>> 
             Ok(n) => n,
             Err(e) => {
                 eprintln!(
-                    "[#] TRANSACTIONPOOL:SYNC - transaction construction error: {:?}",
+                    " [#] TRANSACTIONPOOL:SYNC - transaction construction error: {:?}",
                     e
                 );
                 return Err(format!("transaction construction error: {:?}", e).into());
@@ -795,62 +808,4 @@ pub fn request_fee() -> Result<Option<u8>, Box<dyn Error>> {
     } else {
         Ok(Some(res.res))
     }
-}
-
-pub fn test(wallet: &Wallet) {
-    let src = gen_address(&wallet.pub_key, 1, &wallet.addr_salts[1]);
-    let dst = gen_address(&wallet.pub_key, 2, &wallet.addr_salts[2]);
-    for i in 0..30 {
-        // create transaction
-        let mut transaction = match Transaction::new(&src, &dst, 0.0, "") {
-            Ok(n) => n,
-            Err(e) => {
-                output(&format!("transaction error: {}", e));
-                continue;
-            }
-        };
-        transaction.timestamp += i;
-        // sign transaction
-        match transaction.sign(&wallet) {
-            Ok(_) => (),
-            Err(e) => {
-                output(&format!("sign transaction error: {}", e));
-                continue;
-            }
-        };
-        // validate transaction
-        match transaction.validate() {
-            Ok(_) => (),
-            Err(e) => {
-                output(&format!("transaction validation error: {:?}", e));
-                continue;
-            }
-        }
-
-        // craft request
-        let req = Request {
-            dtype: Dtype::AddTransaction,
-            data: transaction.as_json().to_string(),
-            addr: String::new(),
-        };
-        // send transaction into network
-        let stream = match request(unsafe { ADDRESS.get().unwrap() }, &req) {
-            Ok(n) => n,
-            Err(e) => {
-                output(&format!("transaction aborted due to error: {}", e));
-                continue;
-            }
-        };
-        // receive response
-        match receive::<AddTransactionResponse>(stream) {
-            Ok(n) => output(&format!("transaction released: {:?}", n.res)),
-            Err(e) => output(&format!("transaction aborted due to error: {}", e)),
-        };
-    }
-}
-
-pub fn test1() {
-    let a = 5_f32.to_be_bytes();
-    let c = f32::from_be_bytes(multiply_u8_array(&a, &a).try_into().unwrap());
-    println!("result: {}", c);
 }

@@ -174,7 +174,7 @@ where
         match receive(stream) {
             Ok(n) => responses.push(n),
             Err(e) => {
-                eprintln!("[!] BROADCAST - receive error: {}", e); // DEBUG
+                eprintln!("[!] BROADCAST - receive error: {}", e);
                 continue;
             }
         };
