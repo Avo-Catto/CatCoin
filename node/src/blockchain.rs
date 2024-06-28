@@ -63,7 +63,7 @@ impl Block {
             nonce: 0,
             hash: String::new(),
             merkle: merkle.clone(),
-            hash_str: format!("{}${}${}${}", index, timestamp, merkle, prev_hash),
+            hash_str: format!("{}${}${}", index, merkle, prev_hash),
         }
     }
 
@@ -209,7 +209,7 @@ impl Block {
         block.nonce = nonce;
         block.hash = hash;
         block.merkle = merkle.clone();
-        block.hash_str = format!("{}${}${}${}", idx, timestamp, merkle, previous_hash);
+        block.hash_str = format!("{}${}${}", idx, merkle, previous_hash);
         Ok(block)
     }
 
@@ -486,7 +486,10 @@ impl BlockChain {
     /// Only returns `SyncState::Fine` with an empty list of peers and an index of 0.
     /// Returns `SyncState::Needed` with the corresponding peers and the index to start syncing
     /// from.
-    pub fn check(&self, peers: &Vec<String>) -> Result<(SyncState, Vec<String>, u64), CheckError> {
+    pub fn check(
+        &self,
+        peers: &Vec<String>,
+    ) -> Result<(SyncState, Vec<String>, usize), CheckError> {
         // map latest blocks of the network
         let map = collect_map::<String>(&peers, Dtype::GetBlock, "-1");
 
@@ -550,7 +553,7 @@ impl BlockChain {
             }
         };
         // request blocks backwards until matching
-        let mut idx: u64 = data.len - 1;
+        let mut idx = data.len - 1;
         loop {
             let (mut hash1, mut hash2) = (String::new(), String::new());
             for peer in &map[&hash_network] {
@@ -770,7 +773,7 @@ impl BlockChain {
     /// Get amount of coins of an address.
     pub fn get_balance(&self, addr: &str) -> Result<f64, Box<dyn Error>> {
         // get transactions
-        let transactions = match self.get_transactions(addr) {
+        let transactions = match self.get_transactions(addr, 0) {
             Ok(n) => n,
             Err(e) => return Err(Box::new(e)),
         };
@@ -791,7 +794,7 @@ impl BlockChain {
     }
 
     /// Returns a list of transactions of an address.
-    fn get_transactions(&self, addr: &str) -> Result<Vec<Transaction>, sled::Error> {
+    fn get_transactions(&self, addr: &str, since: u64) -> Result<Vec<Transaction>, sled::Error> {
         // open positions tree
         let positions_tree = match self.position_db.open_tree(&addr) {
             Ok(n) => n,
@@ -805,21 +808,16 @@ impl BlockChain {
                 Ok(n) => n,
                 Err(e) => return Err(e),
             };
-            println!(
-                "DEBUG - get transactions: block idx:{:?}\nDEBUG - get transactions: tx idxs:{:?}",
-                &block_idx, tx_idxs
-            ); // DEBUG
-
+            // check for since
+            if u8_to_u64_vec(&block_idx).unwrap_or(vec![0])[0] < since {
+                continue;
+            }
             // get transaction
             let tx_tree = match self.transactions_db.open_tree(block_idx) {
                 Ok(n) => n,
                 Err(e) => return Err(e),
             };
-            // DEBUG
-            for i in tx_tree.iter().keys() {
-                println!("DEBUG - get transactions: tx_tree key: {:?}", i.unwrap());
-                // DEBUG
-            }
+            // iterate transactions
             for x in tx_idxs.to_vec() {
                 let tx_data = match tx_tree.get(&[x]) {
                     Ok(n) => match n {
@@ -845,30 +843,25 @@ impl BlockChain {
     }
 
     /// Returns a list of transactions where the source address matches a specific pattern.
-    pub fn get_txs_by_pat(&self, pattern: &Vec<u8>) -> Result<Vec<Transaction>, Box<dyn Error>> {
+    pub fn get_txs_by_pat(
+        &self,
+        pattern: &Vec<u8>,
+        since: u64,
+    ) -> Result<Vec<Transaction>, Box<dyn Error>> {
         // get addresses
         let addresses = match self.get_addr_by_pat(pattern) {
             Ok(n) => n,
             Err(e) => return Err(e),
         };
-        println!(
-            "DEBUG - get transactions by pattern: addresses: {:?}",
-            addresses
-        ); // DEBUG
-
         // get transactions
         let mut out: Vec<Transaction> = Vec::new();
         for addr in addresses {
-            let txs = match self.get_transactions(&addr) {
+            let txs = match self.get_transactions(&addr, since) {
                 Ok(n) => n,
                 Err(e) => return Err(Box::new(e)),
             };
             out.extend_from_slice(&txs);
         }
-        println!(
-            "DEBUG - get transactions by pattern: transactions: {:?}",
-            out
-        ); // DEBUG
         Ok(out)
     }
 
@@ -878,7 +871,7 @@ impl BlockChain {
     }
 
     /// Remove a block from the chain.
-    fn remove(&self, idx: u64) -> Result<(), sled::Error> {
+    fn remove(&self, idx: usize) -> Result<(), sled::Error> {
         // remove head
         match self.heads_db.remove(&idx.to_be_bytes()) {
             Ok(_) => (),
@@ -904,14 +897,12 @@ impl BlockChain {
     }
 
     /// Remove all blocks until a specific index from chain.
-    fn remove_until(&self, idx: u64) -> Result<(), sled::Error> {
-        println!("DEBUG - REMOVE UNTIL: {}", idx); // DEBUG
+    fn remove_until(&self, idx: usize) -> Result<(), sled::Error> {
         if idx == 0 {
             return self.clear();
         }
-        let length = self.len() as u64;
+        let length = self.len();
         for i in idx..length {
-            println!("DEBUG - remove: {}", i); // DEBUG
             match self.remove(i) {
                 Ok(_) => (),
                 Err(e) => return Err(e),
@@ -927,7 +918,7 @@ impl BlockChain {
     ///     `SyncState::Ready`      - it's done
     ///
     /// Everything else is either not returned or is an error.
-    pub fn sync(&mut self, addr: &str, mut idx: u64) -> Result<SyncState, Box<dyn Error>> {
+    pub fn sync(&mut self, addr: &str, mut idx: usize) -> Result<SyncState, Box<dyn Error>> {
         {
             // check if currently syncing
             let mut state = self.syncing.lock().unwrap();
@@ -942,9 +933,6 @@ impl BlockChain {
         println!("[+] BLOCKCHAIN:SYNC - updating blockchain");
 
         // remove blocks
-        let length = self.len() as u64;
-        println!("DEBUG - sync: length: {}", length); // debug
-        println!("DEBUG - sync: idx: {}", idx); // debug
         match self.remove_until(idx) {
             Ok(_) => (),
             Err(e) => {
@@ -955,9 +943,6 @@ impl BlockChain {
                 return Err(Box::new(e));
             }
         }
-        let length = self.len() as u64; // DEBUG
-        println!("DEBUG - sync: length: {}", length); // debug
-
         // get blocks from other node
         let mut length = idx + 1;
         while idx < length {
@@ -967,9 +952,6 @@ impl BlockChain {
                 data: idx.to_string(),
                 addr: ADDR.get().unwrap().to_string(),
             };
-
-            println!("DEBUG - Request: {:?}", req); // DEBUG
-
             // send request
             let stream = match request(addr, &req) {
                 Ok(n) => n,
@@ -1001,7 +983,6 @@ impl BlockChain {
             let block = match Block::from_json(&data.block) {
                 Ok(n) => n,
                 Err(e) => {
-                    println!("DEBUG - block json {:#?}", &data.block); // DEBUG
                     eprintln!("[#] BLOCKCHAIN:SYNC - parsing block error: {:?}", e);
                     continue;
                 }
@@ -1037,7 +1018,7 @@ pub struct MineController {
     run_send: Arc<Mutex<mpsc::Sender<bool>>>,
     run_recv: Arc<Mutex<mpsc::Receiver<bool>>>,
     pub current_block: Arc<Mutex<Block>>,
-    pub measured_times: Arc<Mutex<Vec<f64>>>,
+    pub measured_times: Arc<Mutex<Vec<i64>>>,
     sleep: Arc<Duration>,
 }
 
@@ -1049,7 +1030,7 @@ impl MineController {
         blockchain: &Arc<Mutex<BlockChain>>,
         transactionpool: &Arc<Mutex<TransactionPool>>,
         peers: &Arc<Mutex<Vec<String>>>,
-        measured_times: &Arc<Mutex<Vec<f64>>>,
+        measured_times: &Arc<Mutex<Vec<i64>>>,
     ) -> Self {
         let (send, recv) = mpsc::channel();
         MineController {
@@ -1185,19 +1166,27 @@ impl MineController {
         Ok(true)
     }
 
-    // TODO: split some functionality of this function in multiple functions
     /// Run the miner.
     pub fn run(&self, genisis: bool, sync: bool) {
         // synchronize block to mine
         if !genisis && sync {
             match self.sync(&self.current_block) {
-                Ok(_) => {
-                    println!("DEBUG - currently mined block synchronized"); // DEBUG
-                }
+                Ok(_) => (),
                 Err(e) => {
                     panic!("[#] MINECONTROLLER:SYNC - synchronization error: {}", e);
                 }
             };
+            // synchronize difficulty
+            match sync_difficulty(&self.sync_addr.lock().unwrap(), &self.measured_times) {
+                Ok(n) => match n {
+                    SyncState::Ready => (),
+                    _ => panic!("[#] DIFFICULTY:SYNC - synchronization failed: {:?}", n),
+                },
+                Err(e) => {
+                    eprintln!("[#] DIFFICULTY:SYNC - synchronization error: {}", e);
+                    exit(1);
+                }
+            }
         } else {
             // otherwise get next block to mine from chain
             match self.next_block() {
@@ -1214,18 +1203,12 @@ impl MineController {
         let self_arc: Arc<MineController> = Arc::new(self.clone());
         thread::spawn(move || {
             loop {
-                // measurements
-                let start_nonce: u64 = thread_rng().gen(); // calculate hashrate based on incrementation
-                                                           // since start value
-                let start_time = timestamp_now();
-
+                let start_nonce: u64 = thread_rng().gen();
                 let mut stderr: Option<ChildStderr> = None;
                 let block: Option<Block> = loop {
                     // get block to mine
                     let mut block = { self_arc.current_block.lock().unwrap().clone() };
-
-                    // DEBUG
-                    println!("DEBUG - currenlty mined block: \n{}", block);
+                    println!("[+] MINER - mining block:\n{}", block);
 
                     // set up miner
                     let mut miner: Child = {
@@ -1293,35 +1276,6 @@ impl MineController {
                     if !check_skip.is_finished() {
                         self_arc.send_stop();
                     } else {
-                        let mut times = self_arc.measured_times.lock().unwrap();
-                        times.push(timestamp_now() as f64 - start_time as f64);
-                        println!("DEBUG - times: {:?}", times); // DEBUG
-
-                        if times.len() % 2 == 0 {
-                            let expected = unsafe { ARGS.get().unwrap().expected };
-                            println!("DEBUG - expected: {}", expected); // DEBUG
-                            let difficulty = calc_new_target(expected, &times);
-                            println!("DEBUG - new difficulty: {:?}", difficulty); // DEBUG
-                            times.clear();
-
-                            unsafe {
-                                // update difficulty
-                                match DIFFICULTY.get_mut() {
-                                    Some(n) => {
-                                        *n = match difficulty {
-                                            Ok(n) => n,
-                                            Err(_) => {
-                                                eprintln!("[#] MINER - calculate difficulty error");
-                                                n.to_owned()
-                                            }
-                                        }
-                                    }
-                                    None => eprintln!("[#] MINER - update difficulty error"),
-                                }
-                            }
-                        }
-
-                        println!("DEBUG - here I could measure the time"); // DEBUG
                         continue;
                     }
                     // process output
@@ -1337,11 +1291,9 @@ impl MineController {
 
                     // update block
                     block.calc_hash(nonce);
+                    block.timestamp = timestamp_now();
                     break Some(block);
                 };
-                // measure time
-                let stop_time = timestamp_now();
-
                 // retrieve block
                 let block = match block {
                     Some(n) => n,
@@ -1367,51 +1319,12 @@ impl MineController {
                         }
                     }
                 }
-                // measurements
-                println!(
-                    "DEBUG - start: {}\nDEBUG - stop:  {}",
-                    start_time, stop_time
-                ); // DEBUG
-                println!(
-                    "DEBUG - block time needed: {} minutes",
-                    (stop_time as f64 - start_time as f64) / 60_f64
-                ); // DEBUG
-                let hashrate = {
-                    if stop_time - start_time != 0 {
-                        ((block.nonce - start_nonce) / (stop_time - start_time) as u64) as f64
-                    } else {
-                        (block.nonce - start_nonce) as f64
-                    }
-                };
-                let mut times = self_arc.measured_times.lock().unwrap();
-
-                println!("[+] MINER - hashrate: {}/sec", hashrate);
-                times.push((stop_time as f64 - start_time as f64) / 60_f64);
-                println!("DEBUG - times: {:?}", times); // DEBUG
-
-                if times.len() % 2 == 0 {
-                    let expected = unsafe { ARGS.get().unwrap().expected };
-                    println!("DEBUG - expected: {}", expected); // DEBUG
-                    let difficulty = calc_new_target(expected, &times);
-                    println!("DEBUG - new difficulty: {:?}", difficulty); // DEBUG
-                    times.clear();
-
-                    unsafe {
-                        // update difficulty
-                        match DIFFICULTY.get_mut() {
-                            Some(n) => {
-                                *n = match difficulty {
-                                    Ok(n) => n,
-                                    Err(_) => {
-                                        eprintln!("[#] MINER - calculate difficulty error");
-                                        n.to_owned()
-                                    }
-                                }
-                            }
-                            None => eprintln!("[#] MINER - update difficulty error"),
-                        }
-                    }
-                }
+                // measure time
+                manage_difficulty(
+                    &self_arc.measured_times,
+                    &self_arc.blockchain,
+                    block.timestamp,
+                );
                 {
                     // broadcast block & update peers
                     let responses: Vec<Response<PostBlockResponse>>;
@@ -1631,8 +1544,6 @@ impl MineController {
                 return Err(SyncError::Receive);
             }
         };
-        // DEBUG
-        println!("DEBUG - MINECONTROLLER:SYNC received: {:?}", response);
         // parse to json
         let data = match serde_json::Value::from_str(response.res.as_str()) {
             Ok(n) => n,
@@ -1855,7 +1766,6 @@ impl Transaction {
         match check_addr_by_key(&self.src, &self.pub_key) {
             Ok(n) => {
                 if !n {
-                    println!("DEBUG - CASE 1"); // DEBUG
                     return Err(TVE::InvalidSource);
                 }
             }
@@ -1870,7 +1780,6 @@ impl Transaction {
         match check_addr_by_sum(&self.src) {
             Ok(n) => {
                 if !n {
-                    println!("DEBUG - CASE 2"); // DEBUG
                     return Err(TVE::InvalidSource);
                 }
             }
@@ -1897,8 +1806,12 @@ impl Transaction {
                 return Err(TVE::InvalidDestination);
             }
         }
+        // compare src & dst
+        if self.src == self.dst {
+            return Err(TVE::EqualAddresses);
+        }
         // check value
-        if self.val < 0.0 {
+        if self.val <= 0.0 {
             return Err(TVE::InvalidValue);
         }
         // check fee

@@ -1,5 +1,5 @@
 use crate::{
-    blockchain::Transaction,
+    blockchain::{BlockChain, Transaction},
     comm::*,
     share::{ADDR, ARGS, COINBASE, DIFFICULTY, FEE},
 };
@@ -87,6 +87,12 @@ impl std::fmt::Display for CheckError {
 }
 impl std::error::Error for CheckError {}
 
+#[derive(Deserialize)]
+struct DifficultyReceiver {
+    difficulty: BigFloat,
+    times: Vec<i64>,
+}
+
 #[derive(Debug)]
 pub enum SyncError {
     InvalidValue,
@@ -125,6 +131,7 @@ pub enum SyncState {
 #[derive(Debug)]
 pub enum TransactionValidationError {
     BalanceError,
+    EqualAddresses,
     InvalidFee,
     InvalidSource,
     InvalidSignature,
@@ -149,14 +156,14 @@ pub fn calc_fee(val: f64) -> f64 {
 }
 
 /// Calculate the new difficulty target.
-pub fn calc_new_target(expected: u64, measured: &[f64]) -> Result<BigFloat, ()> {
+pub fn calc_new_target(expected: u64, measured: &[i64]) -> Result<BigFloat, ()> {
     // sum all elements of measured time
-    let mut sum: f64 = measured.iter().sum::<f64>(); // * 60
-    if sum <= 0.0 {
-        sum = 1.0;
+    let mut sum = measured.iter().sum::<i64>();
+    if sum <= 0 {
+        sum = 1;
     }
     // calculate multiplicator
-    let multi = (sum * 60_f64) / (expected as usize * measured.len()) as f64;
+    let multi = sum as f64 / (expected as usize * measured.len()) as f64;
 
     // determine new difficulty target
     let difficulty = unsafe { DIFFICULTY.get().unwrap() };
@@ -170,31 +177,22 @@ pub fn check_addr_by_key(addr: &str, pub_key: &Vec<u8>) -> Result<bool, Box<dyn 
     if !check_addr_len(addr) {
         return Ok(false);
     }
-    println!("DEBUG - 1"); // DEBUG
-                           // decode address
+    // decode address
     let decoded = match bs58::decode(addr).into_vec() {
         Ok(n) => n,
         Err(e) => return Err(Box::new(e)),
     };
-    println!("DEBUG - 2"); // DEBUG
-                           // extract salt & index
+    // extract salt & index
     let salt = String::from_utf8_lossy(&decoded[21..33]).to_string();
     let idx: u32 = match String::from_utf8_lossy(&decoded[33..]).parse() {
         Ok(n) => n,
         Err(e) => return Err(Box::new(e)),
     };
-
-    // DEBUG
-    println!("DEBUG - 3"); // DEBUG
-    let check_addr = gen_address(pub_key, idx, &salt);
-    println!("ADDRESS: {}\nINDEX: {}\nSALT: {}", check_addr, idx, salt);
-    // DEBUG
-
     // validate address
+    let check_addr = gen_address(pub_key, idx, &salt);
     if check_addr != addr {
         return Ok(false);
     }
-    println!("DEBUG - 4"); // DEBUG
     Ok(true)
 }
 
@@ -376,6 +374,57 @@ pub fn hash_str(data: &[u8]) -> String {
     format!("{:x}", Sha256::digest(data))
 }
 
+/// Manage time measurements and updating the difficulty automatically.
+pub fn manage_difficulty(
+    times: &Arc<Mutex<Vec<i64>>>,
+    blockchain: &Arc<Mutex<BlockChain>>,
+    timestamp: i64,
+) {
+    match blockchain.lock().unwrap().last() {
+        Ok(n) => match n {
+            Some(n) => {
+                // add time
+                let mut times = times.lock().unwrap();
+                times.push(timestamp - n.timestamp);
+
+                // calculate new difficulty
+                if times.len() % 2 == 0 {
+                    let expected = unsafe { ARGS.get().unwrap().expected };
+                    let difficulty = calc_new_target(expected, &times);
+                    times.clear();
+                    println!(
+                        "[+] DIFFICULTY - new difficulty target: {}",
+                        difficulty.clone().unwrap()
+                    );
+                    unsafe {
+                        // update difficulty
+                        match DIFFICULTY.get_mut() {
+                            Some(n) => {
+                                *n = match difficulty {
+                                    Ok(n) => n,
+                                    Err(_) => {
+                                        eprintln!("[#] DIFFICULTY - calculate difficulty error");
+                                        n.to_owned()
+                                    }
+                                }
+                            }
+                            None => {
+                                eprintln!("[#] DIFFICULTY - update difficulty error")
+                            }
+                        }
+                    }
+                }
+            }
+            None => {
+                eprintln!("[#] DIFFICULTY - failed to retrieve last block")
+            }
+        },
+        Err(e) => {
+            eprintln!("[#] DIFFICULTY - retrieve last block error: {}", e)
+        }
+    }
+}
+
 /// Recursive function that hashes all strings of a vector in pairs together to one hash using SHA256.
 pub fn merkle_hash(data: Vec<String>) -> Option<String> {
     // check if list is empty
@@ -414,6 +463,7 @@ pub fn merkle_hash(data: Vec<String>) -> Option<String> {
     }
 }
 
+// Multiply u8 arrays...
 pub fn multiply_u8_array(a: &[u8], b: &[u8]) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::new();
     for i in 0..a.len() {
@@ -528,16 +578,12 @@ pub fn sync_coinbase(addr: &str) -> Result<SyncState, SyncError> {
     Ok(SyncState::Ready)
 }
 
-// TODO: move up
-#[derive(Deserialize)]
-struct DifficultyReceiver {
-    difficulty: BigFloat,
-    times: Vec<f64>,
-}
-
 /// Synchronize the difficulty.
 /// Returns `SyncState::Ready` if the synchronizationg succeeds.
-pub fn sync_difficulty(addr: &str, measured_times: *mut Vec<f64>) -> Result<SyncState, SyncError> {
+pub fn sync_difficulty(
+    addr: &str,
+    measured_times: &Arc<Mutex<Vec<i64>>>,
+) -> Result<SyncState, SyncError> {
     println!("[+] DIFFICULTY:SYNC - updating difficulty");
 
     // craft request
@@ -574,7 +620,7 @@ pub fn sync_difficulty(addr: &str, measured_times: *mut Vec<f64>) -> Result<Sync
             }
         }
     };
-    measured_times = data.times;
+    *measured_times.lock().unwrap() = data.times;
     Ok(SyncState::Ready)
 }
 

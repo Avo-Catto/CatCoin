@@ -26,7 +26,7 @@ fn main() {
     share::init();
     let args = unsafe { share::ARGS.get().unwrap().to_owned() };
     let addr = share::ADDR.get().unwrap().to_string();
-    let mut measured_times: Vec<f64> = Vec::with_capacity(2);
+    let measured_times = Arc::new(Mutex::new(Vec::with_capacity(2)));
     if !args.genisis && args.sync {
         // synchronize args
         match sync_args(&args.node) {
@@ -40,7 +40,7 @@ fn main() {
             }
         }
         // synchronize difficulty
-        match sync_difficulty(&args.node, *measured_times) {
+        match sync_difficulty(&args.node, &measured_times) {
             Ok(n) => match n {
                 SyncState::Ready => (),
                 _ => panic!("[#] DIFFICULTY:SYNC - synchronization failed: {:?}", n),
@@ -86,7 +86,6 @@ fn main() {
     let last_check = Arc::new(Mutex::new(0_u64));
     let peers = Arc::new(Mutex::new(Vec::<String>::new()));
     let transactionpool = Arc::new(Mutex::new(TransactionPool::new(args.tx_per_block)));
-    let measured_times = Arc::new(Mutex::new(measured_times));
 
     // synchronize everything
     if args.sync && check_ip(&args.node) {
@@ -186,20 +185,6 @@ fn main() {
             let mut buffer = String::new();
             stream.read_to_string(&mut buffer).unwrap();
             stream.shutdown(Shutdown::Read).unwrap();
-
-            {
-                // DEBUG
-                match serde_json::from_str::<Request<String>>(&buffer) {
-                    Ok(n) => {
-                        println!("DEBUG:\n> Dtype: {:?}\n> Data: {}", n.dtype, n.data);
-                        println!("RAW: {}", buffer);
-                    }
-                    Err(e) => {
-                        eprintln!("DEBUG - debug receive error: {}", e);
-                        println!("RAW: {}", buffer);
-                    }
-                };
-            }
 
             // load json from buffer
             let request: Request<String> = match serde_json::from_str(&buffer) {
@@ -446,13 +431,10 @@ fn main() {
                         // get block and respond
                         match chain.get(idx as u64) {
                             Ok(n) => match n {
-                                Some(n) => {
-                                    println!("DEBUG - requested block:\n{}", n); // DEBUG
-                                    respond(
-                                        &stream,
-                                        json!({"block": n.as_json(), "len": length}).to_string(),
-                                    )
-                                }
+                                Some(n) => respond(
+                                    &stream,
+                                    json!({"block": n.as_json(), "len": length}).to_string(),
+                                ),
                                 None => respond(&stream, " "),
                             },
                             Err(e) => {
@@ -473,9 +455,9 @@ fn main() {
                         "difficulty": unsafe {
                             DIFFICULTY.get().unwrap()
                         },
-                        "times": *measured_times.lock().unwrap()
+                        "times": *times.lock().unwrap()
                     });
-                    respond(&stream, unsafe { data.to_string() })
+                    respond(&stream, data.to_string())
                 }
 
                 Dtype::GetFee => respond(&stream, FEE.get().unwrap()),
@@ -497,7 +479,7 @@ fn main() {
 
                 Dtype::GetTransactions => {
                     // parse received pattern
-                    let pattern: Vec<u8> = match serde_json::from_str(&request.data) {
+                    let data: GetTransactionsReceiver = match serde_json::from_str(&request.data) {
                         Ok(n) => n,
                         Err(e) => {
                             eprintln!("[#] DTYPE:GetTransactions - parse error: {}", e);
@@ -508,7 +490,9 @@ fn main() {
                     let chain = { blockchain.lock().unwrap().clone() };
 
                     // retrieve transactions based on the pattern
-                    let transactions: Vec<String> = match chain.get_txs_by_pat(&pattern) {
+                    let transactions: Vec<String> = match chain
+                        .get_txs_by_pat(&data.pattern, data.since)
+                    {
                         Ok(n) => {
                             // parse transaction to json
                             n.iter().map(|x| x.as_json().to_string()).collect()
@@ -534,8 +518,8 @@ fn main() {
                 }
 
                 Dtype::PostBlock => {
-                    // load data as json
-                    let data = match serde_json::Value::from_str(&request.data) {
+                    // parse received data
+                    let block_json = match serde_json::from_str(&request.data) {
                         Ok(n) => n,
                         Err(e) => {
                             respond(&stream, PostBlockResponse::ParsingJsonError);
@@ -544,24 +528,16 @@ fn main() {
                         }
                     };
                     // construct block
-                    let block = match Block::from_json(&data) {
+                    let block = match Block::from_json(&block_json) {
                         Ok(n) => n,
                         Err(e) => {
                             respond(&stream, PostBlockResponse::ConstructionError);
-                            eprintln!("[#] DTYPE:PostBlock - construction error: {:?}", e);
+                            eprintln!("[#] DTYPE:PostBlock - construct block error: {:?}", e);
                             return;
                         }
                     };
-                    {
-                        // debug
-                        println!("\n\nReceived:\n{}\n", block);
-                        println!(
-                            "\n\nCurrent:\n{}\n",
-                            mine_controller.current_block.lock().unwrap()
-                        );
-                    }
                     // parse hash difficulty
-                    let val = get_difficulty_from_hex(&block.hash, 0, RoundingMode::Up);
+                    let val = get_difficulty_from_hex(&block.hash, 2, RoundingMode::Up);
                     {
                         // check hash difficulty
                         if val > unsafe { DIFFICULTY.get().unwrap().clone() } {
@@ -591,6 +567,9 @@ fn main() {
                             return;
                         }
                     }
+                    // measure time
+                    manage_difficulty(&times, &blockchain, block.timestamp);
+
                     // add block to chain
                     match blockchain.lock().unwrap().add_block(&block) {
                         Ok(_) => {
@@ -602,7 +581,8 @@ fn main() {
                             respond(&stream, PostBlockResponse::AddToChainError);
                         }
                     }
-                    mine_controller.skip(); // skip currently mined block
+                    // skip currently mined block
+                    mine_controller.skip();
                 }
 
                 Dtype::Skip => {}
@@ -610,18 +590,3 @@ fn main() {
         });
     }
 }
-
-// > TODO: make difficulty automatically adjusted
-//          - clean up time measurement code
-//          - sync difficulty
-//          - to determine the difficulty: measure the time of the block
-// TODO: partial transactions request (balance) - see client
-// TODO: no transactions of amount 0 or same src and dst
-
-// TODO: other todos
-// TODO: add Docs to functions
-// TODO: client
-// TODO: improve logging -> write a logger or at least generalize the logging
-// TODO: remove debug print statements
-// TODO: GitHub licency
-// TODO: block from slice?

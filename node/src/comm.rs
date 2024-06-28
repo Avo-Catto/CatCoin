@@ -58,6 +58,12 @@ impl std::fmt::Debug for CheckSyncResponse {
     }
 }
 
+#[derive(Deserialize)]
+pub struct GetTransactionsReceiver {
+    pub pattern: Vec<u8>,
+    pub since: u64,
+}
+
 #[derive(Debug, Deserialize)]
 pub enum GetTransactionsResponse {
     ParsingError,
@@ -91,10 +97,10 @@ impl std::fmt::Debug for PostBlockResponse {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct GetBlockReceiver {
     pub block: serde_json::Value,
-    pub len: u64,
+    pub len: usize,
 }
 
 #[derive(Deserialize, Debug, Serialize)]
@@ -166,17 +172,13 @@ where
         };
         // receive response
         match receive(stream) {
-            Ok(n) => {
-                println!("DEBUG - broadcast received: {:?}", n); // DEBUG
-                responses.push(n);
-            }
+            Ok(n) => responses.push(n),
             Err(e) => {
-                eprintln!("DEBUG - broadcast receive error: {}", e); // DEBUG
+                eprintln!("[!] BROADCAST - receive error: {}", e); // DEBUG
                 continue;
             }
         };
     }
-    println!("DEBUG - broadcast responses: {:?}", responses); // DEBUG
     (responses, peers_failed)
 }
 
@@ -207,14 +209,14 @@ where
     match stream.write_all(format!("{{\"res\": {:?}}}", res).as_bytes()) {
         Ok(_) => (),
         Err(e) => {
-            eprintln!("[#] respond[{:?}] - write stream error: {:?}", stream, e);
+            eprintln!("[#] RESPOND[{:?}] - write stream error: {:?}", stream, e);
             return;
         }
     }
     match stream.shutdown(Shutdown::Write) {
         Ok(_) => (),
         Err(e) => {
-            eprintln!("[#] respond[{:?}] - shutdown stream error: {:?}", stream, e);
+            eprintln!("[#] RESPOND[{:?}] - shutdown stream error: {:?}", stream, e);
         }
     }
 }
