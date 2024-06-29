@@ -255,9 +255,11 @@ fn main() {
                             *peers = subtract_vec(peers.to_vec(), failed);
                         }
                     }
+                    // lock pool
+                    let mut pool = transactionpool.lock().unwrap();
                     {
                         // check transaction
-                        match transaction.validate(&blockchain.lock().unwrap()) {
+                        match transaction.validate(&blockchain.lock().unwrap(), &pool) {
                             Ok(_) => {}
                             Err(e) => {
                                 respond(&stream, AddTransactionResponse::FailedCheck);
@@ -267,7 +269,6 @@ fn main() {
                         }
                     }
                     // add transaction to pool
-                    let mut pool = transactionpool.lock().unwrap();
                     match pool.add(&transaction) {
                         Ok(_) => {
                             println!("[+] DTYPE:AddTransaction - added:\n{}", transaction);

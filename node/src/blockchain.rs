@@ -304,7 +304,7 @@ impl Block {
         }
         // check transactions
         for t in transactions {
-            match t.validate(chain) {
+            match t.validate(chain, &TransactionPool::new(1)) {
                 Ok(()) => continue,
                 Err(e) => {
                     println!("transaction invalid: {:?}", e);
@@ -1760,7 +1760,7 @@ impl Transaction {
     }
 
     /// Check entire transaction.
-    pub fn validate(&self, chain: &BlockChain) -> Result<(), TVE> {
+    pub fn validate(&self, chain: &BlockChain, pool: &TransactionPool) -> Result<(), TVE> {
         // check source
         match check_addr_by_key(&self.src, &self.pub_key) {
             Ok(n) => {
@@ -1817,14 +1817,23 @@ impl Transaction {
         if self.fee != calc_fee(self.val) {
             return Err(TVE::InvalidFee);
         }
-        // check balance
-        let balance = match chain.get_balance(&self.src) {
+        // get balance
+        let mut balance = match chain.get_balance(&self.src) {
             Ok(n) => n,
             Err(e) => {
                 eprintln!("[#] TRANSACTION:validate - check balance error: {}", e);
                 return Err(TVE::BalanceError);
             }
         };
+        // check transaction pool
+        let pool_vals: f64 = pool
+            .pool
+            .iter()
+            .map(|tx| if tx.src == self.src { tx.val } else { 0.0 })
+            .sum();
+        balance -= pool_vals;
+
+        // check balance
         if balance < self.val + self.fee {
             return Err(TVE::InvalidBalance);
         }
