@@ -3,24 +3,18 @@
 
 CatCoin is a little personal cryptocurrency project, written from scratch for educational purpose. It covers simple transactions and proof of work nodes.
 
-# Why did I do that? 
+*by Avo-Catto*
 
-I only wrote this cryptocurrency for the sake of education and because of the why not. 
-Also I simply needed something more challenging. 
+# Why did I make it? 
+
+I only wrote this cryptocurrency for the sake of education and because I needed a more challenging project. 
 
 **From this project I've learned:**
 
-- how cryptocurrencies work
-- a whole new programming language, aka Rust
-- multi threading & mutli processing
-- distributed programming
-
-# What is different?
-
-- meant to run locally 
-- different p2p network 
-- transactions on the blockchain to 100%
-- the fee is the percentage of the value of the transaction
+- how cryptocurrencies work in general
+- Rust
+- Multi Threading & Mutli Processing
+- Distributed Programming
 
 # How to use it
 
@@ -39,7 +33,7 @@ Also I simply needed something more challenging.
 
 3. Execute the client:
 
-        cargo run --bin client
+        cargo run --bin client --release
 
     After you executed the client, you'll see some error messages, 
     because the client couldn't connect to any node, 
@@ -117,7 +111,7 @@ Also I simply needed something more challenging.
 
 1. Grep your freshly generated address and let's run the node: 
 
-        cargo run --bin node -- -g -e "30s" -d 12 -w 494A4mrmVgJUMDZJRbgbwALWQPUuu5cKM8m8DceovGDmLFR
+        cargo run --bin node --release -- -g -e "30s" -d 12 -w 494A4mrmVgJUMDZJRbgbwALWQPUuu5cKM8m8DceovGDmLFR
 
     Now you'll see a perfectly fine running node.
     
@@ -164,18 +158,23 @@ Also I simply needed something more challenging.
 
 2. Since a cryptocurrency isn't made out of one node, you might want to run more nodes which requires you to generate more address if you want to mine on different ones. Simply run another node:
 
-        cargo run --bin node -- --sync -p 8001 -w 22FavBpKuh6TKMYny8ySiA9JvtLLx2YhvxpYXL3ekH1393E
+        cargo run --bin node --release -- --sync -p 8001 -w 22FavBpKuh6TKMYny8ySiA9JvtLLx2YhvxpYXL3ekH1393E
 
     You can run as many nodes as you want, but I won't recommend that depending on the amount of cores of your CPU. 
 
-# more is coming soon...
+# What is different?
 
-# TODOS
+This cryptocurrency is meant to run locally on one computer, so the p2p network isn't designed to operate on a large amount of nodes.
 
-- TODO: this README file...
-- TODO: fix double spend bug
-- TODO: docker support
-- TODO: finish client
-- TODO: compile node & client
-- TODO: GitHub Licency
+For the p2p network all of the nodes are connected with each other unlike Bitcoin, where a node is connected with only 5 other nodes. 
+
+But something positive this network structure comes with is that transactions are on the blockchain for 100%. 
+
+To compare it to Bitcoin, which was a reference to me, you should wait a few days to be sure the transaction didn't end up on a sidechain.
+
+Another difference is the fee, because for Bitcoin the size of the transaction is affecting the fee which makes sense because bitcoin supports smart contracts.
+
+CatCoin on the other hand is calculating the fee simply based on the value of the transaction which is by default 5%.
+
+*Funfact:* I don't know how my cryptocurrency is handling a situation where every node has a different chain, but it does in some way...
 

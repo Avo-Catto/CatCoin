@@ -22,7 +22,8 @@ whoami
 login 
 logout 
 list -> addresses
-set -> node",
+set -> node
+exit",
     );
 }
 
@@ -278,7 +279,6 @@ fn main() {
                                 continue;
                             }
                         }
-                        // TODO: better formatting and show fee
                         output(&format!("\n<> Transaction <>\n{}\n", transaction));
                         output("Please double check the information before releasing.");
                         if prompt("Are you sure you want to release the transaction? [y/n]")[0]
